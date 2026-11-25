@@ -1,0 +1,53 @@
+# Rust build output and backups
+target/
+**/*.rs.bk
+
+# Packaged applications, plugins, and downloaded native dependencies
+/dist/
+/build/
+*.exe
+*.dll
+*.pdb
+*.lib
+*.exp
+*.so
+*.so.*
+*.dylib
+*.wasm
+*.apk
+*.aab
+*.zip
+*.7z
+
+# Local references, test runs, and application data
+/.ref/
+/.test-data/
+/data/
+/cache/
+plugin-data/
+*.db
+*.db-*
+*.sqlite
+*.sqlite-*
+*.sqlite3
+*.sqlite3-*
+*.enc
+*.log
+*.tmp
+
+# Local environment and editor settings
+.env
+.env.*
+!.env.example
+.idea/
+.vscode/
+.vs/
+node_modules/
+*.swp
+*.swo
+*~
+
+# Operating system metadata
+.DS_Store
+Thumbs.db
+Desktop.ini

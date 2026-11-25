@@ -1,0 +1,15 @@
+[package]
+name = "netease"
+version.workspace = true
+edition.workspace = true
+[lib]
+crate-type = ["cdylib", "rlib"]
+[dependencies]
+music-core.workspace = true
+music-plugin-sdk.workspace = true
+serde_json.workspace = true
+aes = "0.8"
+ecb = {version="0.1",features=["alloc"]}
+md5 = "0.7"
+hex = "0.4"
+form_urlencoded = "1"
