@@ -11,6 +11,7 @@ mod sound;
 mod test_ui;
 #[cfg(not(target_os = "android"))]
 mod tray;
+mod updates;
 #[cfg(windows)]
 mod window_behavior;
 mod workers;
@@ -614,6 +615,7 @@ pub fn run_at(root: PathBuf) -> Result<()> {
     #[cfg(windows)]
     window_behavior::install(&ui);
     let library = Library::open(&root)?;
+    updates::install(&ui);
     let location = navigation::Location::read(&library);
     #[cfg(not(target_os = "android"))]
     tray::install(&ui, &library, root.clone());

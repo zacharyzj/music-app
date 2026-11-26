@@ -2,11 +2,11 @@
 
 Slint + Rust + libmpv 音乐播放器，使用 QuickJS 执行独立 JavaScript 音乐源。默认只提供本地音乐。网易云、哔哩哔哩、24bit、Audius 和 Incompetech 音乐源均可单独安装。运行播放器无需安装 Flutter 或 Node.js，也无需自行部署 API 服务。
 
-当前版本为 **0.2.12**，应用内名称为 Music Player。版本和工具链分别由 [Cargo.toml](Cargo.toml) 与 [rust-toolchain.toml](rust-toolchain.toml) 管理。
+当前版本为 **0.2.13**，应用内名称为 Music Player。版本和工具链分别由 [Cargo.toml](Cargo.toml) 与 [rust-toolchain.toml](rust-toolchain.toml) 管理。
 
 ## Windows 使用
 
-下载 Windows x64 便携包，解压后运行 `music-app.exe`，并将 `mpv-2.dll` 放在同一目录。[下载 Music Player 0.2.12](https://github.com/zacharyzj/music-app/releases/download/plugins-v0.2.12/MusicPlayer-windows-x64-0.2.12.zip)
+下载 Windows x64 便携包，解压后运行 `music-app.exe`，并将 `mpv-2.dll` 放在同一目录。[下载 Music Player 0.2.13](https://github.com/zacharyzj/music-app/releases/download/plugins-v0.2.13/MusicPlayer-windows-x64-0.2.13.zip)
 
 1. 设置与插件 → 添加音乐目录，扫描标签、封面和同名 `.lrc`。
 2. 在「设置与插件」打开「在线插件」，从 GitHub 列表选择音乐源并点击「安装」。也可以粘贴其他 HTTPS 索引或插件 ZIP 的地址，或用「导入本地 ZIP」。安装后点击「启用」，卡片会以主题色高亮。再次点击「已启用」可停用。
@@ -18,6 +18,8 @@ Windows 跨屏拖动按屏幕长边、短边计算统一缩放倍数，保持窗
 支持拖动边框调整大小、双击标题栏及最大化。窄窗口自动调整侧栏、播放栏和列表，封面切换为两列。Windows 11 标题栏的背景、文字与边框跟随应用深浅主题；更早系统使用原生深浅主题。
 
 播放器启动时会回到上次浏览的音乐源和页面，包括打开的歌单。原音乐源停用后会回到本地音乐，本地歌单已删除时会回到歌单列表。桌面端可在「设置与插件 → 音乐与外观 → 关闭窗口时」选择「退出播放器」（默认）或「隐藏到系统托盘」。隐藏后继续播放和下载，通过托盘图标或菜单可重新显示窗口或退出。
+
+播放器启动时会在后台检查 GitHub 上的正式版，也可以打开「设置与插件 → 播放器更新」手动检查。出现新版提示后，点击「下载新版」即可用系统浏览器下载对应平台和架构的安装包。Windows 便携版下载后，退出播放器并将新版解压到原目录。点击提示上的关闭按钮可留到稍后，下载入口仍在设置里。缺少对应平台安装包时，按钮会打开该版本的 GitHub 发布页。
 
 ### 播放与音效
 
@@ -81,12 +83,14 @@ cargo run -p music-app --locked
 `get-mpv.ps1` 下载固定版本的 libmpv 并校验 SHA-256。生成 Windows 发布包：
 
 ```powershell
-./scripts/build-windows.ps1 -OutputName MusicPlayer-windows-x64-0.2.12
+./scripts/build-windows.ps1 -OutputName MusicPlayer-windows-x64-0.2.13
 ```
 
-发布包位于 `dist/MusicPlayer-windows-x64-0.2.12.zip`；可选插件为 `dist/netease.ypm.zip`、`dist/bilibili.ypm.zip`、`dist/24bit.ypm.zip`、`dist/audius.ypm.zip` 和 `dist/incompetech.ypm.zip`。打包脚本会重新构建插件和 release 主程序，`-Debug` 可生成调试包。
+发布包位于 `dist/MusicPlayer-windows-x64-0.2.13.zip`；可选插件为 `dist/netease.ypm.zip`、`dist/bilibili.ypm.zip`、`dist/24bit.ypm.zip`、`dist/audius.ypm.zip` 和 `dist/incompetech.ypm.zip`。打包脚本会重新构建插件和 release 主程序，`-Debug` 可生成调试包。
 
 主程序包不预装在线源。`cargo xtask plugin` 分别将五个音乐源打包为 `.ypm.zip`。安装器也接受兼容的 YesPlayMusic 插件 ZIP，支持根目录或一层外包装目录中的 `plugin.json`。本宿主实现了网易云使用的 API 子集，不承诺兼容所有 YesPlayMusic 扩展能力。
+
+发布其他平台的播放器时，附件沿用 `MusicPlayer-平台-架构-版本` 命名，例如 `MusicPlayer-macos-arm64-0.2.13.dmg`、`MusicPlayer-linux-x64-0.2.13.AppImage`、`MusicPlayer-android-arm64-v8a-0.2.13.apk`。macOS 和 Android 通用包的架构可写 `universal`。检查更新会优先选择当前架构的包，再选通用包。
 
 libmpv 在运行时动态加载，无需开发头文件。macOS 使用 `libmpv.2.dylib`，Linux 使用 `libmpv.so.2`；可用 `MUSIC_API_MPV` 指定路径。
 
