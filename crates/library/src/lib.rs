@@ -456,10 +456,16 @@ impl Library {
                         .collect();
                 }
                 let offset = a["offset"].as_u64().unwrap_or(0);
-                let more = tracks.len() > offset as usize + 100;
+                // The album's playback queue is built from this page, including long box sets.
+                let limit = if r.op == "album" { tracks.len() } else { 100 };
+                let more = tracks.len().saturating_sub(offset as usize) > limit;
                 Ok(json!(Page {
                     title,
-                    items: tracks.into_iter().skip(offset as usize).take(100).collect(),
+                    items: tracks
+                        .into_iter()
+                        .skip(offset as usize)
+                        .take(limit)
+                        .collect(),
                     offset,
                     more
                 }))
@@ -522,6 +528,37 @@ mod tests {
                 .unwrap();
             assert_eq!(result, json!({track:on,"another":false}));
         }
+    }
+    #[test]
+    fn a_full_album_queue_includes_tracks_beyond_the_library_page() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut lib = Library::open(dir.path()).unwrap();
+        for n in 0..103 {
+            let id = format!("{n:03}");
+            let track = Item {
+                key: ResourceKey {
+                    source: "local".into(),
+                    id: id.clone(),
+                },
+                kind: "track".into(),
+                artist: "Artist".into(),
+                album: "Box".into(),
+                ..Default::default()
+            };
+            lib.db
+                .execute(
+                    "INSERT INTO tracks VALUES (?1,?1,'root','',?2)",
+                    params![id, serde_json::to_string(&track).unwrap()],
+                )
+                .unwrap();
+        }
+        let page = lib.call(Request::new("library", json!({}))).unwrap();
+        assert_eq!(page["items"].as_array().unwrap().len(), 100);
+        let album = lib
+            .call(Request::new("album", json!({"id":"Artist\u{1f}Box"})))
+            .unwrap();
+        assert_eq!(album["items"].as_array().unwrap().len(), 103);
+        assert_eq!(album["more"], false);
     }
     #[test]
     fn scan_incremental_cancel_and_offline_root() {

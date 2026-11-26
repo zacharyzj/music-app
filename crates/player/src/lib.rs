@@ -1,5 +1,8 @@
+mod audio;
+mod output;
 mod video;
 use anyhow::{Result, anyhow};
+pub use audio::{Equalizer, Gains, Normalization, Outputs};
 use libloading::Library;
 use std::{
     ffi::{CStr, CString, c_char, c_int, c_void},
@@ -39,6 +42,13 @@ pub enum Command {
         url: String,
         referrer: Option<String>,
         video: Option<Video>,
+        gains: Gains,
+    },
+    Normalize(Normalization),
+    Output(String),
+    Equalizer {
+        device: String,
+        eq: Equalizer,
     },
     Pause(bool),
     Seek(f64),
@@ -49,6 +59,8 @@ pub enum Command {
 #[derive(Debug)]
 pub enum PlayerEvent {
     Ready,
+    Outputs(Outputs),
+    AudioError(String),
     Position(f64, f64, bool),
     VideoControl(VideoControl),
     Ended,
@@ -141,6 +153,15 @@ unsafe fn run(path: Option<&Path>, rx: Receiver<Command>, tx: Sender<PlayerEvent
             lib.get(b"mpv_terminate_destroy")?;
         let error: libloading::Symbol<unsafe extern "C" fn(c_int) -> *const c_char> =
             lib.get(b"mpv_error_string")?;
+        let api = audio::AudioApi {
+            create: *create,
+            init: *init,
+            set: *set,
+            cmd: *command,
+            destroy: *destroy,
+            get: *lib.get(b"mpv_get_property_string")?,
+            free: *lib.get(b"mpv_free")?,
+        };
         let h = create();
         if h.is_null() {
             return Err(anyhow!("mpv_create failed"));
@@ -151,6 +172,7 @@ unsafe fn run(path: Option<&Path>, rx: Receiver<Command>, tx: Sender<PlayerEvent
         };
         for (k, v) in [
             ("config", "no"),
+            ("volume-gain-max", "18"),
             ("vid", "no"),
             ("vo", "gpu-next,gpu"),
             ("autofit-larger", "85%x85%"),
@@ -189,6 +211,14 @@ unsafe fn run(path: Option<&Path>, rx: Receiver<Command>, tx: Sender<PlayerEvent
         let mut active = false;
         let mut ticks = 0;
         let mut control_script = None;
+        let mut routing = output::Routing::new();
+        let mut eq = Equalizer::default();
+        let mut eq_device = String::new();
+        let mut loudness = audio::Loudness::default();
+        let mut pending_file = None;
+        let report_audio = |error: anyhow::Error| {
+            let _ = tx.send(PlayerEvent::AudioError(error.to_string()));
+        };
         loop {
             match rx.recv_timeout(Duration::from_millis(30)) {
                 Ok(Command::Quit) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
@@ -198,7 +228,10 @@ unsafe fn run(path: Option<&Path>, rx: Receiver<Command>, tx: Sender<PlayerEvent
                             url,
                             referrer,
                             video,
+                            gains,
                         } => {
+                            pending_file = None;
+                            loudness.stop();
                             active = false;
                             let (url, menu) = if let Some(v) = &video {
                                 if control_script.is_none() {
@@ -216,7 +249,36 @@ unsafe fn run(path: Option<&Path>, rx: Receiver<Command>, tx: Sender<PlayerEvent
                                 (url, String::new())
                             };
                             dispatch(h, *command, &["set", "user-data/music-video", &menu])?;
-                            load_file(url, referrer, video)
+                            let audio_url = video
+                                .as_ref()
+                                .and_then(|v| v.audio_url.as_deref())
+                                .unwrap_or(&url);
+                            if let Err(e) =
+                                loudness.open(api, h, audio_url, referrer.as_deref(), gains)
+                            {
+                                report_audio(e);
+                            }
+                            pending_file = Some(load_file(url, referrer, video));
+                            Vec::new()
+                        }
+                        Command::Normalize(mode) => {
+                            if let Err(e) = loudness.set_mode(api, h, mode) {
+                                report_audio(e);
+                            }
+                            Vec::new()
+                        }
+                        Command::Output(id) => {
+                            routing.select(id);
+                            Vec::new()
+                        }
+                        Command::Equalizer { device, eq: next } => {
+                            if routing.state.as_ref().is_some_and(|s| s.active == device) {
+                                match audio::set_eq(api, h, eq, next) {
+                                    Ok(()) => eq = next,
+                                    Err(e) => report_audio(e),
+                                }
+                            }
+                            Vec::new()
                         }
                         Command::Pause(p) => vec![
                             "set".into(),
@@ -233,19 +295,50 @@ unsafe fn run(path: Option<&Path>, rx: Receiver<Command>, tx: Sender<PlayerEvent
                         ],
                         Command::Stop => {
                             active = false;
+                            pending_file = None;
+                            loudness.stop();
                             dispatch(h, *command, &["set", "user-data/music-video", ""])?;
                             vec!["stop".into()]
                         }
                         Command::Quit => unreachable!(),
                     };
-                    let status = dispatch(h, *command, &args)?;
-                    if status < 0 {
+                    if !args.is_empty()
+                        && let status = dispatch(h, *command, &args)?
+                        && status < 0
+                    {
                         let _ = tx.send(PlayerEvent::Error(
                             CStr::from_ptr(error(status)).to_string_lossy().into_owned(),
                         ));
                     }
                 }
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
+            }
+            if let Err(e) = loudness.poll(api, h) {
+                report_audio(e);
+            }
+            if !loudness.waiting()
+                && let Some(args) = pending_file.take()
+            {
+                let status = dispatch(h, *command, &args)?;
+                if status < 0 {
+                    let _ = tx.send(PlayerEvent::Error(
+                        CStr::from_ptr(error(status)).to_string_lossy().into_owned(),
+                    ));
+                }
+            }
+            match routing.refresh(api, h) {
+                Ok(Some(outputs)) => {
+                    if eq_device != outputs.active {
+                        eq_device.clone_from(&outputs.active);
+                        match audio::set_eq(api, h, eq, Equalizer::default()) {
+                            Ok(()) => eq = Equalizer::default(),
+                            Err(e) => report_audio(e),
+                        }
+                    }
+                    let _ = tx.send(PlayerEvent::Outputs(outputs));
+                }
+                Err(e) => report_audio(e),
+                _ => {}
             }
             loop {
                 let e = &*wait(h, 0.0);

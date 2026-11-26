@@ -99,6 +99,12 @@ export async function stream({id, video = false}) {
   const audio = [...(data?.dash?.audio || [])].sort((a, b) => b.bandwidth - a.bandwidth);
   const audioUrl = firstMedia(audio);
   const combined = data?.durl?.length === 1 ? firstMedia(data.durl) : "";
+  const loudness = {};
+  const volume = data?.volume;
+  if (Number.isFinite(volume?.measured_i) && volume.measured_i < 0 && volume.measured_i > -70) {
+    loudness.gain = -18 - volume.measured_i;
+    if (Number.isFinite(volume.measured_tp)) loudness.peak = 10 ** (volume.measured_tp / 20);
+  }
   if (video) {
     const quality = Number(data?.quality) || 80;
     const tracks = (data?.dash?.video || []).filter(rep => !rep.id || rep.id <= quality);
@@ -106,15 +112,15 @@ export async function stream({id, video = false}) {
     const initial = qualities.find(q => q.height <= 1080) || qualities[0];
     // Legacy DASH responses may omit dimensions for the single picture stream.
     const url = initial?.url || firstMedia(tracks);
-    if (url && audioUrl) return {url, audioUrl, referrer, qualities};
+    if (url && audioUrl) return {...loudness, url, audioUrl, referrer, qualities};
     if (combined) {
       const height = qualityHeight[data?.quality];
-      return {url:combined, referrer, qualities:height ? [{height, url:combined}] : []};
+      return {...loudness, url:combined, referrer, qualities:height ? [{height, url:combined}] : []};
     }
-    if (url && !audio.length) return {url, referrer, qualities};
+    if (url && !audio.length) return {...loudness, url, referrer, qualities};
     throw new Error("哔哩哔哩未向当前账号或游客提供可播放的视频");
   }
-  if (audioUrl || combined) return {url:audioUrl || combined, referrer};
+  if (audioUrl || combined) return {...loudness, url:audioUrl || combined, referrer};
   throw new Error("哔哩哔哩未向当前账号或游客提供可播放的音轨");
 }
 

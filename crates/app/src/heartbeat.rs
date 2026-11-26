@@ -97,6 +97,7 @@ impl UiState {
             .unwrap_or_else(|| std::mem::take(&mut self.queue));
         normal.index = favorites.iter().position(|t| t.key == seed.key);
         normal.items = favorites;
+        normal.album_origin = None;
         self.heartbeat = Some(Heartbeat {
             playlist,
             favorites: normal,

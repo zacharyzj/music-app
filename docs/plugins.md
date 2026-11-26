@@ -87,3 +87,7 @@ API 请求必须为清单允许的 HTTPS 域名；支持精确域名和 `*.examp
 `cargo xtask plugin` 在 `dist/` 生成五个独立插件包和 `plugins.json`。索引根对象含 `schema: 1` 和 `plugins` 数组。每条记录含 `id`、`name`、`version`、`description`、`url`、`sha256`、`network` 和 `media`。发布包使用带版本的绝对地址。自托管索引也可使用相对于索引的地址。
 
 维护者推送 `plugins-v*` 标签会触发 `.github/workflows/publish-plugins.yml`，自动构建包并在同名 GitHub Release 上传索引与插件。播放器使用公开 HTTPS 下载地址，无需登录 GitHub。
+
+### 播放响度
+
+音乐源的 `stream` 结果可选返回 `gain`、`peak`、`albumGain` 和 `albumPeak`。增益使用 dB，峰值使用线性幅度（1.0 对应 0 dBFS）。来源未提供的字段直接省略。播放器根据队列选择单曲或专辑增益，关闭响度均衡时沿用原音量。

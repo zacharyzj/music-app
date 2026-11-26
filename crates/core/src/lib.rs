@@ -127,6 +127,8 @@ pub enum PlaybackMode {
 pub struct Queue {
     pub items: Vec<Item>,
     pub index: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub album_origin: Option<ResourceKey>,
     // Keep the existing queue format and remember the mode to restore after shuffle.
     #[serde(default)]
     repeat: u8,
@@ -184,6 +186,7 @@ impl Queue {
         if n >= self.items.len() {
             return;
         }
+        self.album_origin = None;
         self.items.remove(n);
         self.index = match self.index {
             Some(i) if i == n => None,

@@ -2,11 +2,11 @@
 
 Slint + Rust + libmpv 音乐播放器，使用 QuickJS 执行独立 JavaScript 音乐源。默认只提供本地音乐。网易云、哔哩哔哩、24bit、Audius 和 Incompetech 音乐源均可单独安装。运行播放器无需安装 Flutter 或 Node.js，也无需自行部署 API 服务。
 
-当前版本为 **0.2.11**，应用内名称为 Music Player。版本和工具链分别由 [Cargo.toml](Cargo.toml) 与 [rust-toolchain.toml](rust-toolchain.toml) 管理。
+当前版本为 **0.2.12**，应用内名称为 Music Player。版本和工具链分别由 [Cargo.toml](Cargo.toml) 与 [rust-toolchain.toml](rust-toolchain.toml) 管理。
 
 ## Windows 使用
 
-下载 Windows x64 便携包，解压后运行 `music-app.exe`，并将 `mpv-2.dll` 放在同一目录。[下载 Music Player 0.2.11](https://github.com/zacharyzj/music-app/releases/download/plugins-v0.2.11/MusicPlayer-windows-x64-0.2.11.zip)
+下载 Windows x64 便携包，解压后运行 `music-app.exe`，并将 `mpv-2.dll` 放在同一目录。[下载 Music Player 0.2.12](https://github.com/zacharyzj/music-app/releases/download/plugins-v0.2.12/MusicPlayer-windows-x64-0.2.12.zip)
 
 1. 设置与插件 → 添加音乐目录，扫描标签、封面和同名 `.lrc`。
 2. 在「设置与插件」打开「在线插件」，从 GitHub 列表选择音乐源并点击「安装」。也可以粘贴其他 HTTPS 索引或插件 ZIP 的地址，或用「导入本地 ZIP」。安装后点击「启用」，卡片会以主题色高亮。再次点击「已启用」可停用。
@@ -18,6 +18,14 @@ Windows 跨屏拖动按屏幕长边、短边计算统一缩放倍数，保持窗
 支持拖动边框调整大小、双击标题栏及最大化。窄窗口自动调整侧栏、播放栏和列表，封面切换为两列。Windows 11 标题栏的背景、文字与边框跟随应用深浅主题；更早系统使用原生深浅主题。
 
 播放器启动时会回到上次浏览的音乐源和页面，包括打开的歌单。原音乐源停用后会回到本地音乐，本地歌单已删除时会回到歌单列表。桌面端可在「设置与插件 → 音乐与外观 → 关闭窗口时」选择「退出播放器」（默认）或「隐藏到系统托盘」。隐藏后继续播放和下载，通过托盘图标或菜单可重新显示窗口或退出。
+
+### 播放与音效
+
+在「设置与插件 → 播放与音效」打开「响度均衡」。默认关闭。歌单、搜索、随机和心动模式逐曲调整。从专辑页开始顺序播放或列表循环时，共用一个增益以保留曲间强弱。离开专辑页面继续播放也会沿用该增益。
+
+播放器优先使用文件或音乐源提供的响度数据。缺少数据时，它用自带的 libmpv 静音分析，本地文件最多等待 5 秒，在线音频最多等待 3 秒并取开头最多 24 秒估算。实测响度以 −18 LUFS 为目标，并为峰值留出 1 dB 余量。局部样本只用于衰减，遇到静音、超时且没有有效读数时沿用原音量。缺少专辑数据时，以第一首播放曲目的安全衰减值作为整张专辑的增益。
+
+输出设备可跟随系统，也可指定耳机或音箱。每个设备独立保存手动选择的曲风预设和低、中、高三个频段（±9 dB）。选择「原声」可将三个频段归零。桌面端支持自动识别系统默认设备，Android 13 及以上可读取系统媒体路由。系统未报告可识别的默认设备时，可以手动选择列表中的具体输出。
 
 ### 播放栏快捷键
 
@@ -73,10 +81,10 @@ cargo run -p music-app --locked
 `get-mpv.ps1` 下载固定版本的 libmpv 并校验 SHA-256。生成 Windows 发布包：
 
 ```powershell
-./scripts/build-windows.ps1 -OutputName MusicPlayer-windows-x64-0.2.11
+./scripts/build-windows.ps1 -OutputName MusicPlayer-windows-x64-0.2.12
 ```
 
-发布包位于 `dist/MusicPlayer-windows-x64-0.2.11.zip`；可选插件为 `dist/netease.ypm.zip`、`dist/bilibili.ypm.zip`、`dist/24bit.ypm.zip`、`dist/audius.ypm.zip` 和 `dist/incompetech.ypm.zip`。打包脚本会重新构建插件和 release 主程序，`-Debug` 可生成调试包。
+发布包位于 `dist/MusicPlayer-windows-x64-0.2.12.zip`；可选插件为 `dist/netease.ypm.zip`、`dist/bilibili.ypm.zip`、`dist/24bit.ypm.zip`、`dist/audius.ypm.zip` 和 `dist/incompetech.ypm.zip`。打包脚本会重新构建插件和 release 主程序，`-Debug` 可生成调试包。
 
 主程序包不预装在线源。`cargo xtask plugin` 分别将五个音乐源打包为 `.ypm.zip`。安装器也接受兼容的 YesPlayMusic 插件 ZIP，支持根目录或一层外包装目录中的 `plugin.json`。本宿主实现了网易云使用的 API 子集，不承诺兼容所有 YesPlayMusic 扩展能力。
 

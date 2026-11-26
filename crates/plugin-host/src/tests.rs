@@ -260,13 +260,22 @@ fn trial_fallback_and_lyrics() {
     let dir = tempfile::tempdir().unwrap();
     let mut s = session(upstream(), dir.path());
     s.host.borrow_mut().fixture = Some(
-        json!({"song/enhance/player/url/v1":{"responses":[{"code":200,"data":[{"url":"https://m7.music.126.net/trial","freeTrialInfo":{}}]},{"code":200,"data":[{"url":"https://m7.music.126.net/full","freeTrialInfo":null,"level":"standard"}]}]},"song/lyric":{"code":200,"lrc":{"lyric":"[00:01.00]歌词"}}}),
+        json!({"song/enhance/player/url/v1":{"responses":[{"code":200,"data":[{"url":"https://m7.music.126.net/trial","freeTrialInfo":{}}]},{"code":200,"data":[{"url":"https://m7.music.126.net/full","freeTrialInfo":null,"level":"standard","gain":-5.5,"peak":0.84,"albumGain":-4.0,"albumPeak":0.9}]}]},"song/lyric":{"code":200,"lrc":{"lyric":"[00:01.00]歌词"}}}),
     );
     let p = s
         .call(Request::new("stream", json!({"id":"7","quality":"high"})))
         .unwrap();
     assert_eq!(p["url"], "https://m7.music.126.net/full");
     assert_eq!(p["quality"], "standard");
+    assert_eq!(
+        (
+            p["gain"].as_f64(),
+            p["albumGain"].as_f64(),
+            p["peak"].as_f64(),
+            p["albumPeak"].as_f64()
+        ),
+        (Some(-5.5), Some(-4.), Some(0.84), Some(0.9))
+    );
     assert_eq!(
         s.call(Request::new("lyrics", json!({"id":"7"}))).unwrap()["lrc"],
         "[00:01.00]歌词"
@@ -666,7 +675,7 @@ fn bilibili_search_uses_issued_cookies_and_resolves_video_audio() {
     let combined = "https://cdn.bilivideo.cn/muxed.mp4";
     let page_url = format!("https://www.bilibili.com/video/{bv}/");
     s.host.borrow_mut().fixture.as_mut().unwrap()[&pictures] = json!({
-        "_expectCookie":"SESSDATA=user", "code":0, "data":{"quality":64,"dash":{
+        "_expectCookie":"SESSDATA=user", "code":0, "data":{"quality":64,"volume":{"measured_i":-10,"measured_tp":0},"dash":{
             "video":[
                 {"id":16,"height":360,"baseUrl":"https://cdn.bilivideo.cn/360.m4s"},
                 {"id":64,"height":720,"codecid":12,"baseUrl":"https://cdn.bilivideo.cn/hevc.m4s"},
@@ -679,7 +688,7 @@ fn bilibili_search_uses_issued_cookies_and_resolves_video_audio() {
     let watch = Request::new("stream", json!({"id":bv,"video":true}));
     assert_eq!(
         s.call(watch.clone()).unwrap(),
-        json!({"url":picture,"audioUrl":sound,"referrer":page_url,"qualities":[
+        json!({"url":picture,"audioUrl":sound,"referrer":page_url,"gain":-8,"peak":1,"qualities":[
             {"height":720,"url":picture},{"height":360,"url":"https://cdn.bilivideo.cn/360.m4s"}
         ]})
     );

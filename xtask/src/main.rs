@@ -215,6 +215,7 @@ fn playback(url: &str, referrer: Option<&str>) -> Result<()> {
         url: url.into(),
         referrer: referrer.map(str::to_owned),
         video: None,
+        gains: Default::default(),
     })?;
     let deadline = Instant::now() + Duration::from_secs(25);
     let mut paused = false;

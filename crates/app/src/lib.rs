@@ -5,6 +5,7 @@ mod heartbeat;
 mod navigation;
 mod preferences;
 mod search;
+mod sound;
 #[cfg(all(test, feature = "ui-smoke"))]
 #[path = "../tests/support/mod.rs"]
 mod test_ui;
@@ -77,6 +78,7 @@ struct UiState {
     checking_current_like: bool,
     next_offset: u64,
     queue: Queue,
+    normalize: bool,
     heartbeat: Option<heartbeat::Heartbeat>,
     heartbeat_generation: u64,
     resume_heartbeat: Option<String>,
@@ -119,6 +121,7 @@ impl UiState {
             checking_current_like: false,
             next_offset: 0,
             queue,
+            normalize: false,
             heartbeat: None,
             heartbeat_generation: 0,
             resume_heartbeat: None,
@@ -657,6 +660,7 @@ pub fn run_at(root: PathBuf) -> Result<()> {
         std::env::var_os("MUSIC_API_MPV").as_deref().map(Path::new),
     ));
     let ptx = player.commands.clone();
+    let sound = sound::Sound::install(&ui, Library::open(&root)?, state.clone(), ptx.clone());
     let _ = ptx.send(Command::Volume(ui.get_volume_level() as f64));
     {
         let mut s = state.borrow_mut();
@@ -778,12 +782,7 @@ pub fn run_at(root: PathBuf) -> Result<()> {
                         return;
                     }
                     s.stop_heartbeat(&ui);
-                    s.queue.items = s
-                        .items
-                        .iter()
-                        .filter(|t| t.kind == "track" && !t.unavailable)
-                        .cloned()
-                        .collect();
+                    s.replace_queue_from_page();
                     s.queue.index = s.queue.items.iter().position(|t| t.key == item.key);
                     refresh_queue(&ui, &s);
                     play(&ui, &mut s, &job, &pc, item, video);
@@ -821,6 +820,7 @@ pub fn run_at(root: PathBuf) -> Result<()> {
                         if !s.on_heartbeat_page(&ui) {
                             s.stop_heartbeat(&ui);
                         }
+                        s.queue.album_origin = None;
                         s.queue.items.push(item);
                         refresh_queue(&ui, &s);
                     }
@@ -967,12 +967,7 @@ pub fn run_at(root: PathBuf) -> Result<()> {
                     return;
                 }
                 s.stop_heartbeat(&ui);
-                s.queue.items = s
-                    .items
-                    .iter()
-                    .filter(|t| t.kind == "track" && !t.unavailable)
-                    .cloned()
-                    .collect();
+                s.replace_queue_from_page();
                 s.queue.index = None;
                 if let Some(t) = s.queue.advance(false, rand::random()) {
                     refresh_queue(&ui, &s);
@@ -1292,12 +1287,18 @@ pub fn run_at(root: PathBuf) -> Result<()> {
     let settings = preferences.clone();
     let last_written = saved_preferences.clone();
     let live_player = player.clone();
+    let mut last_normalization = music_player::Normalization::Off;
     timer.start(
         slint::TimerMode::Repeated,
         Duration::from_millis(100),
         move || {
             let Some(ui) = weak.upgrade() else { return };
             let mut s = st.borrow_mut();
+            let normalization = s.normalization();
+            if normalization != last_normalization {
+                let _ = pc.send(Command::Normalize(normalization.clone()));
+                last_normalization = normalization;
+            }
             while let Ok(result) = catalog_rx.try_recv() {
                 match result {
                     Ok(catalog::Fetched::List(entries)) => {
@@ -1516,7 +1517,9 @@ pub fn run_at(root: PathBuf) -> Result<()> {
                             ui.set_has_error(false);
                             if let Some(url) = v["url"].as_str() {
                                 s.heartbeat_resolved();
+                                let _ = pc.send(Command::Normalize(s.normalization()));
                                 let _ = pc.send(Command::Open {
+                                    gains: music_player::Gains::from_stream(&v),
                                     url: url.into(),
                                     referrer: v["referrer"].as_str().map(str::to_owned),
                                     video: (reply.args["video"] == true).then(|| Video {
@@ -1900,6 +1903,8 @@ pub fn run_at(root: PathBuf) -> Result<()> {
             while let Ok(e) = live_player.events.try_recv() {
                 match e {
                     PlayerEvent::Ready => {}
+                    PlayerEvent::Outputs(devices) => sound.borrow_mut().outputs(&ui, &pc, devices),
+                    PlayerEvent::AudioError(e) => ui.invoke_notify_row(e.into()),
                     PlayerEvent::VideoControl(control) => {
                         PlaybackSettings::apply_video_control(&settings, &ui, control)
                     }

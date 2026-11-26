@@ -1,7 +1,7 @@
 {
   "id": "bilibili",
   "name": "哔哩哔哩",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "description": "搜索 B 站视频，收听音轨或观看视频，支持哔哩哔哩客户端扫码登录。",
   "main": "index.js",
   "playback": "stream",

@@ -177,6 +177,18 @@ export component AppWindow inherits Window {
     in property <bool> supports-tray;
     in property <bool> close-to-tray;
     callback select-close-behavior(bool);
+    in property <bool> normalize-loudness;
+    in property <[string]> output-names;
+    in property <int> output-index;
+    in property <bool> eq-available;
+    in property <int> eq-index;
+    in property <int> eq-low;
+    in property <int> eq-mid;
+    in property <int> eq-high;
+    callback toggle-loudness(bool);
+    callback select-output(int);
+    callback select-eq(int);
+    callback adjust-eq(int,float);
     in-out property <string> search-text <=> query.text;
     in-out property <int> search-kind <=> kind.current-index;
     in-out property <int> nav-index:0;
@@ -397,6 +409,29 @@ export component AppWindow inherits Window {
                                 Rectangle {horizontal-stretch:1;}
                             }
                         }}
+                        Rectangle {height:312px;border-radius:16px;background:Theme.panel;
+                            VerticalLayout {padding:20px;spacing:8px;
+                                HorizontalLayout {
+                                    Text {text:"播放与音效";color:Theme.ink;font-size:17px;font-weight:600;vertical-alignment:center;horizontal-stretch:1;}
+                                    CheckBox {text:"响度均衡";checked:root.normalize-loudness;toggled=>{root.toggle-loudness(self.checked);}}
+                                }
+                                Text {text:"混播逐曲调整响度，专辑顺序播放时共用增益";color:Theme.muted;font-size:12px;}
+                                HorizontalLayout {spacing:12px;
+                                    Text {text:"输出设备";color:Theme.ink;vertical-alignment:center;width:68px;}
+                                    ComboBox {model:root.output-names;current-index:root.output-index;selected(_)=>{root.select-output(self.current-index);}horizontal-stretch:1;min-width:0px;}
+                                }
+                                HorizontalLayout {spacing:12px;
+                                    Text {text:"均衡器";color:Theme.ink;vertical-alignment:center;width:68px;}
+                                    ComboBox {enabled:root.eq-available;model:["原声","流行","摇滚","人声","古典","自定义"];current-index:root.eq-index;selected(_)=>{root.select-eq(self.current-index);}width:132px;}
+                                    Text {text:root.eq-available?"为当前设备保存":"选择具体设备后可调节";color:Theme.muted;font-size:12px;vertical-alignment:center;horizontal-stretch:1;}
+                                }
+                                for band[i] in ["低频","中频","高频"]: HorizontalLayout {spacing:12px;
+                                    Text {text:band;color:Theme.muted;width:68px;vertical-alignment:center;}
+                                    Slider {minimum:-9;maximum:9;step:1;enabled:root.eq-available;value:i==0?root.eq-low:i==1?root.eq-mid:root.eq-high;changed(v)=>{root.adjust-eq(i,v);}}
+                                    Text {text:(i==0?root.eq-low:i==1?root.eq-mid:root.eq-high)+" dB";width:44px;color:Theme.ink;horizontal-alignment:right;vertical-alignment:center;}
+                                }
+                            }
+                        }
                         Rectangle {height:125px + root.plugin-rows.length*110px;border-radius:16px;background:Theme.panel;VerticalLayout {padding:20px;spacing:14px;
                             HorizontalLayout {Text {text:"音乐源插件";color:Theme.ink;font-size:17px;font-weight:600;horizontal-stretch:1;}ActionButton {text:"导入本地 ZIP";clicked=>{root.action("import");}}ActionButton {text:"在线插件";primary:true;clicked=>{root.show-catalog=true;if root.catalog-rows.length==0 {root.catalog-action(-1);}}}}
                             Text {text:"安装兼容的音乐源，即可在左侧切换。账号数据在本机加密保存。";color:Theme.muted;font-size:12px;wrap:word-wrap;}

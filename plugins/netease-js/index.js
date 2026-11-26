@@ -415,7 +415,14 @@ export async function stream({ id: value, quality = "high" }) {
     // 无完整音频时只向下尝试；登录失效、网络和验证错误由 api 原样报告。
     if (!s?.url || (s.freeTrialInfo && s.freeTrialInfo !== "null")) continue;
     if (!/^https?:\/\//i.test(s.url)) fail("unavailable", "网易云未返回有效的音频地址");
-    return { url: s.url.replace(/^http:\/\//i, "https://"), type: s.type || "mp3", quality: s.level || level, bitRate: s.br || 0, size: s.size || 0 };
+    const loudness = {};
+    for (const [gain, peak] of [["gain", "peak"], ["albumGain", "albumPeak"]]) {
+      if (Number.isFinite(s[gain]) && (s[gain] !== 0 || s[peak] > 0)) {
+        loudness[gain] = s[gain];
+        if (Number.isFinite(s[peak]) && s[peak] > 0) loudness[peak] = s[peak];
+      }
+    }
+    return { ...loudness, url: s.url.replace(/^http:\/\//i, "https://"), type: s.type || "mp3", quality: s.level || level, bitRate: s.br || 0, size: s.size || 0 };
   }
   fail("unavailable", hasSession() ? "此歌曲需要会员、单独购买，或当前地区无版权；不会以试听片段代替完整歌曲" : "此歌曲需要登录或相应会员权限，请先扫码登录网易云音乐");
 }
