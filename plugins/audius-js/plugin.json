@@ -1,0 +1,13 @@
+{
+  "id": "audius",
+  "name": "Audius 音乐",
+  "version": "1.0.0",
+  "description": "免登录搜索多位音乐人的作品，下载发布者向游客开放的完整录音。支持简繁体歌名。",
+  "main": "index.js",
+  "playback": "stream",
+  "capabilities": ["download", "anonymous", "tracksOnly"],
+  "permissions": {
+    "network": ["api.audius.co"],
+    "media": ["*.audius.co", "*.open-audio-validator.com", "*.mainnet.audiusindex.org", "v.monophonic.digital", "audius-figment-1-validator-18.figment.io", "audius-figment-1-validator-19.figment.io", "audius-nodes.com", "validator.soundmaxx.xyz", "validator.stuffisup.com"]
+  }
+}

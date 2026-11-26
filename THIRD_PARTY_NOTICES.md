@@ -47,3 +47,9 @@ QuickJS-NG source and licensing: https://github.com/quickjs-ng/quickjs
 The NetEase JS package includes its original LICENSE and THIRD_PARTY_NOTICES.md. Its local changes cover the manifest (navigation, version, and media permissions) and cloud cover mapping: numeric image IDs fall back to the album image URL.
 
 Rust dependencies and exact versions are recorded in Cargo.lock; each dependency retains its upstream license. Public redistribution needs the corresponding source/license materials for the selected Slint and libmpv distribution. This repository does not choose a commercial Slint license for the user.
+
+## Audius plugin
+
+The optional Audius plugin uses character mappings derived from OpenCC 1.1.9.
+[OpenCC attribution](plugins/audius-js/THIRD_PARTY_NOTICES.md) and the
+[Apache 2.0 license](plugins/audius-js/LICENSE.OpenCC) are included in its ZIP.

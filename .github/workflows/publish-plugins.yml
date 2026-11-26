@@ -1,0 +1,27 @@
+name: Publish music source plugins
+on:
+  push:
+    tags: ['plugins-v*']
+permissions:
+  contents: write
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: '1.99.0'
+      - run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo run --locked -p xtask -- plugin
+        env:
+          MUSIC_PLUGIN_RELEASE_BASE: https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}
+      - name: Publish verified packages and catalog
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" --json isDraft,assets --jq '.isDraft == false and ([.assets[].name] | index("plugins.json") != null)' 2>/dev/null | grep -qx true; then
+            exit 0
+          fi
+          gh release create "$GITHUB_REF_NAME" dist/*.ypm.zip dist/plugins.json --verify-tag --latest --title "Music source plugins ${GITHUB_REF_NAME#plugins-v}" --notes "在播放器的设置与插件中打开在线插件，即可查看并安装这些音乐源。"

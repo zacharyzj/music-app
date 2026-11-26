@@ -1,0 +1,25 @@
+{
+  "id": "24bit",
+  "name": "24bit 无损音乐",
+  "version": "1.0.0",
+  "description": "按曲名或歌手搜索 24bit，播放站点公开的音轨，下载时核对本站游客额度。",
+  "main": "index.js",
+  "playback": "stream",
+  "capabilities": [
+    "anonymous",
+    "download",
+    "tracksOnly"
+  ],
+  "searchPageSize": 30,
+  "permissions": {
+    "network": [
+      "www.24bit.net"
+    ],
+    "media": [
+      "www.24bit.net",
+      "*.music.126.net",
+      "*.qqmusic.qq.com",
+      "*.gtimg.cn"
+    ]
+  }
+}

@@ -3,7 +3,7 @@ use serde_json::Value;
 
 pub const ABI_VERSION: u32 = 1;
 pub const MAX_MESSAGE: usize = 16 * 1024 * 1024;
-#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub struct ResourceKey {
     pub source: String,
     pub id: String,
@@ -14,10 +14,15 @@ pub struct Item {
     pub key: ResourceKey,
     pub kind: String,
     pub title: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub search_aliases: Vec<String>,
     pub subtitle: String,
     pub cover: String,
     pub duration_ms: u64,
     pub unavailable: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub downloadable: Option<bool>,
+    pub license: String,
     pub album: String,
     pub artist: String,
 }
@@ -73,12 +78,22 @@ pub struct Manifest {
     pub version: String,
     pub abi: u32,
     pub capabilities: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub search_page_size: Option<std::num::NonZeroU16>,
     pub network: Vec<String>,
     pub media: Vec<String>,
     #[serde(default)]
     pub navigation: Vec<Navigation>,
     #[serde(default)]
     pub settings: Vec<Setting>,
+}
+impl Manifest {
+    pub fn supports_likes(&self) -> bool {
+        !self
+            .capabilities
+            .iter()
+            .any(|c| matches!(c.as_str(), "anonymous" | "readOnly"))
+    }
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Navigation {

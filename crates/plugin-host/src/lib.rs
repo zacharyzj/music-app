@@ -1,9 +1,10 @@
+pub mod catalog;
 mod package;
 mod storage;
 use aes::cipher::{BlockEncryptMut, KeyInit, block_padding::Pkcs7};
 use anyhow::{Result, anyhow, bail, ensure};
 use music_core::{MAX_MESSAGE, Request};
-pub use package::{Package, allowed, bundle, install, manifest, media_allowed};
+pub use package::{Package, allowed, bundle, install, install_with, manifest, media_allowed};
 use rquickjs::{Context, Ctx, Function, Module, Runtime as JsRuntime};
 use serde_json::{Value, json};
 use std::{
@@ -89,6 +90,10 @@ impl Host {
                 self.storage.remove(key)?;
                 Ok(Value::Null)
             }
+            "mediaAllowed" => Ok(json!(media_allowed(
+                v["url"].as_str().unwrap_or_default(),
+                &self.package.manifest.media
+            ))),
             "setting" => Ok(self.storage.get(key)),
             "prompt" => {
                 self.prompt = v["prompt"].clone();
@@ -126,8 +131,26 @@ impl Host {
                     } else {
                         value.clone()
                     };
+                    if let Some(expected) = body["_expectCookie"].as_str() {
+                        ensure!(
+                            v["headers"]["Cookie"].as_str().unwrap_or("") == expected,
+                            "Unexpected fixture cookie"
+                        );
+                    }
+                    if let Some(expected) = body.get("_expectBody") {
+                        ensure!(
+                            v["method"] == "POST"
+                                && serde_json::from_str::<Value>(v["body"].as_str().unwrap_or(""))?
+                                    == *expected,
+                            "Unexpected fixture POST body"
+                        );
+                    }
+                    let content = body["_text"]
+                        .as_str()
+                        .map(str::to_owned)
+                        .unwrap_or_else(|| body.to_string());
                     return Ok(
-                        json!({"status":200,"headers":{},"cookies":body.get("_cookies").cloned().unwrap_or(json!([])),"body":body.to_string()}),
+                        json!({"status":200,"headers":{},"cookies":body.get("_cookies").cloned().unwrap_or(json!([])),"body":content}),
                     );
                 }
                 let method =
@@ -154,7 +177,10 @@ impl Host {
                     ensure!(body.len() <= MAX_MESSAGE, "请求过大");
                     req = req.body(body.to_owned());
                 }
-                let response = req.send()?;
+                let response = req.send().map_err(|e| {
+                    let detail = anyhow::Error::new(e.without_url());
+                    anyhow!("HTTPS 请求失败：{detail:#}")
+                })?;
                 let status = response.status().as_u16();
                 ensure!(
                     !response.status().is_redirection(),

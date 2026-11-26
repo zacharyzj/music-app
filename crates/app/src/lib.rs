@@ -1,19 +1,22 @@
 mod covers;
+mod download;
+mod search;
 #[cfg(windows)]
 mod window_behavior;
+mod workers;
 use anyhow::Result;
 use music_core::*;
 use music_library::Library;
 use music_player::{Command, Player, PlayerEvent};
-use music_plugin_host::{Runtime, manifest};
+use music_plugin_host::{catalog, manifest};
 use serde_json::{Value, json};
-use slint::{ComponentHandle, ModelRc, VecModel};
+use slint::{ComponentHandle, Model, ModelRc, VecModel};
 use std::{
     cell::RefCell,
     path::{Path, PathBuf},
     rc::Rc,
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc,
     },
@@ -34,8 +37,12 @@ struct Reply {
 }
 struct UiState {
     source: String,
+    page_source: String,
+    online: Option<search::Search>,
+    downloads: download::Downloads,
     sources: Vec<String>,
     plugins: Vec<(Manifest, bool)>,
+    catalog: Vec<catalog::Entry>,
     nav: Vec<Navigation>,
     page_links: Vec<Navigation>,
     page_tabs: Vec<Navigation>,
@@ -54,6 +61,146 @@ struct UiState {
     loaded: bool,
     play_generation: u64,
 }
+fn has_capability(plugins: &[(Manifest, bool)], id: &str, cap: &str) -> bool {
+    plugins
+        .iter()
+        .any(|(m, enabled)| *enabled && m.id == id && m.capabilities.iter().any(|c| c == cap))
+}
+
+impl UiState {
+    fn clear_page(&mut self, ui: &AppWindow) {
+        self.items.clear();
+        self.page_source = self.source.clone();
+        self.online = None;
+        ui.set_can_filter(false);
+        self.page_links.clear();
+        ui.set_online_sources(ModelRc::default());
+        ui.set_page_links(ModelRc::default());
+        ui.set_page_tabs(ModelRc::default());
+        ui.set_rows(ModelRc::default());
+        ui.set_more(false);
+        ui.set_next_label("加载更多".into());
+        ui.set_search_page(false);
+        ui.set_can_download(false);
+        ui.set_home_page(false);
+        ui.set_album_detail(false);
+        ui.set_local_playlist(false);
+        ui.set_has_error(false);
+    }
+
+    fn update_rows(&self, ui: &AppWindow) {
+        let list: Vec<_> = self
+            .items
+            .iter()
+            .map(|item| {
+                let mut result = row(item);
+                let plugin = self
+                    .plugins
+                    .iter()
+                    .find(|(m, enabled)| *enabled && m.id == item.key.source)
+                    .map(|(m, _)| m);
+                let anonymous =
+                    plugin.is_some_and(|m| m.capabilities.iter().any(|c| c == "anonymous"));
+                let can_download = plugin.is_some_and(|m| {
+                    !m.media.is_empty() && m.capabilities.iter().any(|c| c == "download")
+                });
+                result.show_download = item.kind == "track" && can_download;
+                result.account_actions = plugin.is_none_or(Manifest::supports_likes);
+                if self.online.is_some()
+                    && let Some(m) = plugin
+                {
+                    let mut details = vec![m.name.as_str()];
+                    if !result.subtitle.is_empty() {
+                        details.push(result.subtitle.as_str());
+                    }
+                    if result.show_download && item.downloadable != Some(false) {
+                        details.push(if anonymous && item.downloadable == Some(true) {
+                            "免登录可下载"
+                        } else if !anonymous {
+                            "按账号确认"
+                        } else {
+                            "下载权限待确认"
+                        });
+                    }
+                    result.subtitle = details.join(" · ").into();
+                }
+                if let Some(index) = self.downloads.index(&item.key) {
+                    use download::Phase::*;
+                    let phase = &self.downloads.0[index].phase;
+                    result.download_blocked |= !matches!(phase, Failed(_));
+                    result.download_label = match phase {
+                        Queued => "排队中",
+                        Active { .. } => "下载中",
+                        Complete => "已入库",
+                        Failed(_) => "重试",
+                    }
+                    .into();
+                }
+                result
+            })
+            .collect();
+        ui.set_rows(ModelRc::new(VecModel::from(list)));
+    }
+
+    fn begin_online(&mut self, ui: &AppWindow, jobs: &mpsc::Sender<Job>, genr: &AtomicU64) -> bool {
+        let kind = self.last.args["kind"].as_str().unwrap_or("track");
+        let Some(search) = search::Search::new(&self.plugins, &self.source, kind) else {
+            return false;
+        };
+        let mut choices = vec![slint::SharedString::from("全部音乐源")];
+        choices.extend(search.sources.iter().map(|s| s.name.as_str().into()));
+        ui.set_online_sources(ModelRc::new(VecModel::from(choices)));
+        ui.set_online_index(0);
+        ui.set_search_page(true);
+        ui.set_can_filter(kind == "track");
+        ui.set_can_download(search.sources.iter().any(|s| s.downloads));
+        ui.set_page_account_actions(search.sources.iter().any(|s| s.likes));
+        ui.set_heading(if self.source == "local" {
+            "在线搜索".into()
+        } else {
+            format!("搜索结果 · {}", search.sources[0].name).into()
+        });
+        self.online = Some(search);
+        self.request_pages(jobs, genr, false);
+        self.show_search(ui);
+        true
+    }
+
+    fn request_pages(&mut self, jobs: &mpsc::Sender<Job>, genr: &AtomicU64, guest_only: bool) {
+        if let Some(search) = self.online.as_mut() {
+            for (source, offset) in search.requests(guest_only) {
+                let mut args = self.last.args.clone();
+                args["offset"] = json!(offset);
+                send(jobs, genr, &source, "search", args);
+            }
+        }
+    }
+
+    fn show_search(&mut self, ui: &AppWindow) {
+        let Some(search) = &self.online else {
+            return;
+        };
+        let guest_only = ui.get_can_filter() && ui.get_guest_only();
+        self.items = search.visible(guest_only);
+        let pending = search.pending(guest_only);
+        let errors = search.errors(guest_only);
+        let mut status = format!("{} 项结果", self.items.len());
+        if pending > 0 {
+            status.push_str(&format!(" · {pending} 个源搜索中"));
+        }
+        if !errors.is_empty() {
+            status.push_str(&format!(" · {}", errors.join("；")));
+        }
+        ui.set_status(status.into());
+        ui.set_has_error(!errors.is_empty() && self.items.is_empty() && pending == 0);
+        ui.set_busy(self.items.is_empty() && pending > 0);
+        ui.set_more(search.more(guest_only));
+        ui.set_next_label(search.next_label(guest_only).into());
+        ui.set_cards(!self.items.is_empty() && self.items.iter().all(|i| i.kind != "track"));
+        self.update_rows(ui);
+    }
+}
+
 fn image_path(path: &str) -> slint::Image {
     if Path::new(path).is_file() {
         slint::Image::load_from_path(Path::new(path)).unwrap_or_default()
@@ -64,7 +211,13 @@ fn image_path(path: &str) -> slint::Image {
 fn row(t: &Item) -> Row {
     Row {
         title: t.title.clone().into(),
-        subtitle: t.subtitle.clone().into(),
+        subtitle: if t.license.is_empty() {
+            t.subtitle.clone()
+        } else {
+            format!("{} · {}", t.subtitle, t.license)
+        }
+        .into(),
+        resource: format!("{}:{}", t.key.source, t.key.id).into(),
         kind: t.kind.clone().into(),
         cover: if !t.cover.starts_with("http") {
             image_path(&t.cover)
@@ -72,6 +225,15 @@ fn row(t: &Item) -> Row {
             slint::Image::default()
         },
         disabled: t.unavailable,
+        show_download: false,
+        account_actions: true,
+        download_blocked: t.downloadable == Some(false),
+        download_label: if t.downloadable == Some(false) {
+            "未开放下载"
+        } else {
+            "下载"
+        }
+        .into(),
         album: t.album.clone().into(),
         duration: format!(
             "{:02}:{:02}",
@@ -84,6 +246,36 @@ fn row(t: &Item) -> Row {
 fn rows(items: &[Item]) -> ModelRc<Row> {
     ModelRc::new(VecModel::from(items.iter().map(row).collect::<Vec<_>>()))
 }
+fn prepare_items(
+    items: &mut [Item],
+    plugins: &[(Manifest, bool)],
+    source: &str,
+    covers: &mpsc::SyncSender<covers::Cover>,
+    generation: u64,
+) {
+    let domains = plugins
+        .iter()
+        .find(|(m, _)| m.id == source)
+        .map(|(m, _)| m.media.as_slice())
+        .unwrap_or_default();
+    for item in items {
+        item.key.source = source.to_owned();
+        if source == "local" {
+            continue;
+        }
+        if !music_plugin_host::media_allowed(&item.cover, domains) {
+            item.cover.clear();
+        } else {
+            let _ = covers.try_send(covers::Cover {
+                key: item.key.clone(),
+                url: item.cover.clone(),
+                domains: domains.to_vec(),
+                generation,
+            });
+        }
+    }
+}
+
 fn local_nav() -> Vec<Navigation> {
     vec![
         ("歌曲", "library", json!({"kind":"track"})),
@@ -250,8 +442,12 @@ pub fn run_at(root: PathBuf) -> Result<()> {
     let plugins = plugin_list(&plugin_dir, &library);
     let state = Rc::new(RefCell::new(UiState {
         source: "local".into(),
+        page_source: "local".into(),
+        online: None,
+        downloads: download::Downloads::restore(library.get("download-queue")),
         sources: vec!["local".into()],
         plugins,
+        catalog: Vec::new(),
         nav: local_nav(),
         page_links: vec![],
         page_tabs: vec![],
@@ -275,168 +471,22 @@ pub fn run_at(root: PathBuf) -> Result<()> {
     let generation = Arc::new(AtomicU64::new(1));
     let cancel = Arc::new(AtomicBool::new(false));
     let (cover_tx, cover_rx) = covers::worker(root.join("cover-cache"), generation.clone());
-    let worker_root = root.clone();
-    let worker_cancel = cancel.clone();
-    let worker_gen = generation.clone();
-    std::thread::spawn(move || {
-        let mut db = library;
-        let rt = Runtime::new();
-        for job in rx {
-            let Job {
-                source,
-                request,
-                generation: g,
-            } = job;
-            let op = request.op.clone();
-            let args = request.args.clone();
-            let data = worker_root.join("plugin-data");
-            if g != worker_gen.load(Ordering::Relaxed)
-                && [
-                    "search",
-                    "home",
-                    "browse",
-                    "album",
-                    "artist",
-                    "playlist",
-                    "loginPoll",
-                ]
-                .contains(&op.as_str())
-            {
-                continue;
-            }
-            let result = (|| -> Result<Value> {
-                if source != "local" {
-                    anyhow::ensure!(
-                        [
-                            "search",
-                            "suggest",
-                            "home",
-                            "browse",
-                            "album",
-                            "artist",
-                            "playlist",
-                            "playlists",
-                            "liked",
-                            "like",
-                            "savedAlbums",
-                            "saveAlbum",
-                            "recent",
-                            "resolve",
-                            "lyrics",
-                            "account",
-                            "loginStart",
-                            "loginPoll",
-                            "loginCancel",
-                            "signOut",
-                            "settings",
-                            "isLiked"
-                        ]
-                        .contains(&op.as_str()),
-                        "音乐源不能调用应用管理操作"
-                    );
-                }
-                if op == "persist" {
-                    db.set("queue", args["queue"].clone())?;
-                    db.set("dark", args["dark"].clone())?;
-                    return Ok(Value::Null);
-                }
-                if op == "scan" {
-                    worker_cancel.store(false, Ordering::Relaxed);
-                    if let Some(p) = args["path"].as_str() {
-                        db.add_folder(Path::new(p))?;
-                    }
-                    let warnings = db.scan(&worker_cancel)?;
-                    return Ok(json!(warnings));
-                }
-                if op == "plugins" {
-                    return Ok(json!(plugin_list(&worker_root.join("plugins"), &db)));
-                }
-                if op == "install" {
-                    let installed = plugin_list(&worker_root.join("plugins"), &db);
-                    let m = music_plugin_host::install(
-                        Path::new(args["path"].as_str().unwrap_or("")),
-                        &worker_root.join("plugins"),
-                    )?;
-                    if !installed.iter().any(|(old, _)| {
-                        old.id == m.id
-                            && m.network.iter().all(|d| old.network.contains(d))
-                            && (old.media.is_empty()
-                                || (!m.media.is_empty()
-                                    && m.media.iter().all(|d| old.media.contains(d))))
-                    }) {
-                        db.set(&format!("disabled:{}", m.id), json!(true))?;
-                    }
-                    rt.unload(&m.id);
-                    return Ok(json!(m));
-                }
-                if op == "toggle" {
-                    rt.unload(args["id"].as_str().unwrap_or(""));
-                    let key = format!("disabled:{}", args["id"].as_str().unwrap_or(""));
-                    db.set(&key, json!(db.get(&key) != true))?;
-                    return Ok(Value::Null);
-                }
-                if op == "remove" {
-                    rt.unload(args["id"].as_str().unwrap_or(""));
-                    let id = args["id"].as_str().unwrap_or("");
-                    if plugin_list(&worker_root.join("plugins"), &db)
-                        .iter()
-                        .any(|(m, _)| m.id == id)
-                    {
-                        std::fs::remove_file(
-                            worker_root.join("plugins").join(format!("{id}.ypm.zip")),
-                        )?;
-                        for p in [
-                            data.join(format!("{id}.enc")),
-                            worker_root.join("plugins").join(format!("{id}.previous")),
-                            worker_root.join("plugins").join(format!("{id}.pending")),
-                        ] {
-                            if p.exists() {
-                                std::fs::remove_file(p)?;
-                            }
-                        }
-                    }
-                    return Ok(Value::Null);
-                }
-                let actual = if op == "resolve" {
-                    "stream"
-                } else if op == "local-playlists" {
-                    "playlists"
-                } else {
-                    &op
-                };
-                let req = Request::new(actual, args.clone());
-                if source == "local" {
-                    return Ok(db.call(req)?);
-                }
-                if db.get(&format!("disabled:{source}")) == true {
-                    anyhow::bail!("插件已停用");
-                }
-                let bytes = std::fs::read(
-                    worker_root
-                        .join("plugins")
-                        .join(format!("{source}.ypm.zip")),
-                )?;
-                let value = rt.call(&bytes, &data, req)?;
-                if op == "resolve"
-                    && !music_plugin_host::media_allowed(
-                        value["url"].as_str().unwrap_or(""),
-                        &manifest(&bytes)?.media,
-                    )
-                {
-                    anyhow::bail!("播放地址不在插件声明的媒体域名内");
-                }
-                Ok(value)
-            })()
-            .map_err(|e| e.to_string());
-            let _ = out_tx.send(Reply {
-                source,
-                op,
-                args,
-                value: result,
-                generation: g,
-            });
-        }
-    });
+    let library = Arc::new(Mutex::new(library));
+    let (progress_tx, progress_rx) = mpsc::channel();
+    let download_tx = download::worker(
+        root.join("downloads"),
+        library.clone(),
+        out_tx.clone(),
+        progress_tx,
+    );
+    workers::Workers {
+        root: root.clone(),
+        library,
+        generation: generation.clone(),
+        out: out_tx,
+        download_tx,
+    }
+    .start(rx, cancel.clone());
     let player = Rc::new(Player::start(
         std::env::var_os("MUSIC_API_MPV").as_deref().map(Path::new),
     ));
@@ -446,6 +496,7 @@ pub fn run_at(root: PathBuf) -> Result<()> {
         update_plugins(&ui, &mut s);
         show_nav(&ui, &s);
         refresh_queue(&ui, &s);
+        s.schedule_downloads(&ui, &tx, &generation);
     }
     let weak = ui.as_weak();
     let st = state.clone();
@@ -466,16 +517,16 @@ pub fn run_at(root: PathBuf) -> Result<()> {
         s.login_inflight = false;
         ui.set_show_login(false);
         s.source = source.clone();
+        s.clear_page(&ui);
+        let anonymous = has_capability(&s.plugins, &source, "anonymous");
+        ui.set_anonymous_source(anonymous);
+        ui.set_has_quality_setting(s.plugins.iter().any(|(m, on)| {
+            *on && m.id == source && m.settings.iter().any(|setting| setting.key == "quality")
+        }));
         ui.set_nav_index(0);
-        ui.set_page_links(ModelRc::default());
-        ui.set_page_tabs(ModelRc::default());
         s.page_tabs.clear();
         s.suggest_query.clear();
-        s.items.clear();
-        ui.set_rows(ModelRc::default());
         ui.set_suggestions(ModelRc::default());
-        ui.set_album_detail(false);
-        ui.set_local_playlist(false);
         ui.set_account_name("登录".into());
         s.nav = if source == "local" {
             local_nav()
@@ -493,7 +544,7 @@ pub fn run_at(root: PathBuf) -> Result<()> {
         );
         ui.set_busy(true);
         send(&job, &genr, &source, &s.last.op, s.last.args.clone());
-        if source != "local" {
+        if source != "local" && !anonymous {
             send(&job, &genr, &source, "account", json!({}));
             if s.plugins
                 .iter()
@@ -514,14 +565,37 @@ pub fn run_at(root: PathBuf) -> Result<()> {
             let mut s = st.borrow_mut();
             s.suggest_query.clear();
             genr.fetch_add(1, Ordering::Relaxed);
+            s.clear_page(&ui);
+            ui.set_search_page(true);
             s.last = Request::new("search", json!({
-                "query": query.as_str(),
+                "query": query.trim(),
                 "kind": (["track", "album", "artist", "playlist"].get(kind as usize).unwrap_or(&"track"))
             }));
             ui.set_busy(true);
             ui.set_show_settings(false);
             ui.set_show_lyrics(false);
-            send(&job, &genr, &s.source, &s.last.op, s.last.args.clone());
+            if s.source == "local" || !s.begin_online(&ui, &job, &genr) {
+                send(&job, &genr, &s.source, &s.last.op, s.last.args.clone());
+            }
+        }
+    });
+    let weak = ui.as_weak();
+    let st = state.clone();
+    ui.on_online_source(move |index| {
+        let Some(ui) = weak.upgrade() else { return };
+        let mut s = st.borrow_mut();
+        if let Some(search) = &mut s.online {
+            search.selected =
+                (index > 0 && index as usize <= search.sources.len()).then(|| index as usize - 1);
+            ui.set_online_index(index);
+            s.show_search(&ui);
+        }
+    });
+    let weak = ui.as_weak();
+    let st = state.clone();
+    ui.on_filter_changed(move || {
+        if let Some(ui) = weak.upgrade() {
+            st.borrow_mut().show_search(&ui);
         }
     });
     let weak = ui.as_weak();
@@ -532,6 +606,7 @@ pub fn run_at(root: PathBuf) -> Result<()> {
         if let Some(ui) = weak.upgrade() {
             let mut s = st.borrow_mut();
             if let Some(n) = s.nav.get(i as usize).cloned() {
+                s.clear_page(&ui);
                 ui.set_nav_index(i);
                 genr.fetch_add(1, Ordering::Relaxed);
                 s.last = Request::new(&n.op, n.args);
@@ -554,6 +629,16 @@ pub fn run_at(root: PathBuf) -> Result<()> {
                 return;
             };
             match action.as_str() {
+                "download"
+                    if item.kind == "track"
+                        && item.downloadable != Some(false)
+                        && has_capability(&s.plugins, &item.key.source, "download") =>
+                {
+                    if s.downloads.enqueue(item) {
+                        s.schedule_downloads(&ui, &job, &genr);
+                    }
+                }
+                "open" if item.kind == "track" && item.unavailable => {}
                 "open" if item.kind == "track" => {
                     s.queue.items = s
                         .items
@@ -567,6 +652,8 @@ pub fn run_at(root: PathBuf) -> Result<()> {
                 }
                 "open" => {
                     genr.fetch_add(1, Ordering::Relaxed);
+                    s.clear_page(&ui);
+                    s.page_source = item.key.source.clone();
                     s.last = Request::new(&item.kind, json!({"id":item.key.id}));
                     ui.set_busy(true);
                     send(
@@ -591,12 +678,12 @@ pub fn run_at(root: PathBuf) -> Result<()> {
                             "addToPlaylist",
                             json!({"id":p.key.id,"track":item.key.id}),
                         );
-                    } else if item.kind == "track" {
+                    } else if item.kind == "track" && !item.unavailable {
                         s.queue.items.push(item);
                         refresh_queue(&ui, &s);
                     }
                 }
-                "remove" if s.source == "local" && s.last.op == "playlist" => {
+                "remove" if s.page_source == "local" && s.last.op == "playlist" => {
                     send(
                         &job,
                         &genr,
@@ -647,6 +734,31 @@ pub fn run_at(root: PathBuf) -> Result<()> {
                 play(&ui, &mut s, &job, &genr, &pc, t);
             }
         }
+    });
+    let weak = ui.as_weak();
+    let st = state.clone();
+    let jobs = tx.clone();
+    let genr = generation.clone();
+    ui.on_download_action(move |index, action| {
+        let Some(ui) = weak.upgrade() else {
+            return;
+        };
+        let mut s = st.borrow_mut();
+        let index = index as usize;
+        let Some(entry) = s.downloads.0.get(index) else {
+            return;
+        };
+        match action.as_str() {
+            "retry" if matches!(entry.phase, download::Phase::Failed(_)) => {
+                let item = entry.item.clone();
+                s.downloads.enqueue(item);
+            }
+            "remove" if !matches!(entry.phase, download::Phase::Active { .. }) => {
+                s.downloads.0.remove(index);
+            }
+            _ => return,
+        }
+        s.schedule_downloads(&ui, &jobs, &genr);
     });
     let weak = ui.as_weak();
     let st = state.clone();
@@ -717,6 +829,7 @@ pub fn run_at(root: PathBuf) -> Result<()> {
                 }
             }
             "library" => {
+                s.clear_page(&ui);
                 genr.fetch_add(1, Ordering::Relaxed);
                 s.last = Request::new(
                     if s.source == "local" {
@@ -731,20 +844,23 @@ pub fn run_at(root: PathBuf) -> Result<()> {
                 ui.set_show_lyrics(false);
                 send(&job, &genr, &s.source, &s.last.op, s.last.args.clone());
             }
+            "more" if s.online.is_some() => {
+                s.request_pages(&job, &genr, ui.get_can_filter() && ui.get_guest_only());
+                s.show_search(&ui);
+            }
             "more" => {
                 let mut req = s.last.clone();
-                let step = if s.source == "local" { 100 } else { 50 };
+                let step = if s.page_source == "local" { 100 } else { 50 };
                 req.args["offset"] = json!(req.args["offset"].as_u64().unwrap_or(0) + step);
-                s.last = req;
                 ui.set_busy(true);
-                send(&job, &genr, &s.source, &s.last.op, s.last.args.clone());
+                send(&job, &genr, &s.page_source, &req.op, req.args);
             }
             "save-album" | "unsave-album" => {
                 if s.last.op == "album" {
                     send(
                         &job,
                         &genr,
-                        &s.source,
+                        &s.page_source,
                         "saveAlbum",
                         json!({"id":s.last.args["id"],"on":a=="save-album"}),
                     );
@@ -797,6 +913,43 @@ pub fn run_at(root: PathBuf) -> Result<()> {
             }
             _ => {}
         }
+    });
+    ui.set_catalog_url(catalog::DEFAULT_URL.into());
+    let (catalog_tx, catalog_rx) = mpsc::channel();
+    let weak = ui.as_weak();
+    let st = state.clone();
+    ui.on_catalog_action(move |index| {
+        let Some(ui) = weak.upgrade() else { return };
+        if ui.get_catalog_busy() {
+            return;
+        }
+        let address = ui.get_catalog_url().to_string();
+        let entry = if index < 0 {
+            None
+        } else {
+            let Some(entry) = st.borrow().catalog.get(index as usize).cloned() else {
+                return;
+            };
+            Some(entry)
+        };
+        if index < 0 {
+            st.borrow_mut().catalog.clear();
+            ui.set_catalog_rows(ModelRc::default());
+        }
+        ui.set_catalog_busy(true);
+        ui.set_catalog_status(
+            if entry.is_some() {
+                "正在下载并校验插件…"
+            } else {
+                "正在读取在线地址…"
+            }
+            .into(),
+        );
+        let sender = catalog_tx.clone();
+        std::thread::spawn(move || {
+            let _ =
+                sender.send(catalog::load(&address, entry.as_ref()).map_err(|e| format!("{e:#}")));
+        });
     });
     let weak = ui.as_weak();
     let st = state.clone();
@@ -895,7 +1048,7 @@ pub fn run_at(root: PathBuf) -> Result<()> {
         let Some(ui) = weak.upgrade() else { return };
         let mut s = st.borrow_mut();
         s.suggest_query = query.to_string();
-        if query.chars().count() < 2 || s.source == "local" {
+        if query.chars().count() < 2 || s.source == "local" || ui.get_anonymous_source() {
             ui.set_suggestions(ModelRc::default());
             debounce.stop();
             return;
@@ -929,7 +1082,7 @@ pub fn run_at(root: PathBuf) -> Result<()> {
                 s.last = Request::new(&n.op, n.args);
                 ui.set_busy(true);
                 ui.set_show_lyrics(false);
-                send(&job, &genr, &s.source, &s.last.op, s.last.args.clone());
+                send(&job, &genr, &s.page_source, &s.last.op, s.last.args.clone());
             }
         }
     });
@@ -950,7 +1103,7 @@ pub fn run_at(root: PathBuf) -> Result<()> {
                 }
                 s.last = Request::new(&n.op, n.args);
                 ui.set_busy(true);
-                send(&job, &genr, &s.source, &s.last.op, s.last.args.clone());
+                send(&job, &genr, &s.page_source, &s.last.op, s.last.args.clone());
             }
         }
     });
@@ -960,14 +1113,93 @@ pub fn run_at(root: PathBuf) -> Result<()> {
     let job = tx.clone();
     let genr = generation.clone();
     let pc = ptx.clone();
+    #[cfg(feature = "ui-smoke")]
+    let mut capture_download = std::env::var_os("MUSIC_API_CAPTURE_DOWNLOAD").is_some();
     let mut saved = Instant::now();
+    let mut catalog_file: Option<tempfile::NamedTempFile> = None;
     timer.start(
         slint::TimerMode::Repeated,
         Duration::from_millis(100),
         move || {
             let Some(ui) = weak.upgrade() else { return };
             let mut s = st.borrow_mut();
+            while let Ok(result) = catalog_rx.try_recv() {
+                match result {
+                    Ok(catalog::Fetched::List(entries)) => {
+                        ui.set_catalog_status(format!("{} 个可用插件", entries.len()).into());
+                        s.catalog = entries;
+                        #[cfg(feature = "ui-smoke")]
+                        if let Ok(id) = std::env::var("MUSIC_API_CAPTURE_CATALOG_ID")
+                            && let Some(i) = s.catalog.iter().position(|e| e.id == id)
+                        {
+                            let window = ui.as_weak();
+                            slint::Timer::single_shot(Duration::ZERO, move || {
+                                if let Some(ui) = window.upgrade() {
+                                    ui.invoke_catalog_action(i as i32);
+                                }
+                            });
+                        }
+                        update_catalog_rows(&ui, &s);
+                        ui.set_catalog_busy(false);
+                    }
+                    Ok(catalog::Fetched::Package(file)) => {
+                        send(
+                            &job,
+                            &genr,
+                            "local",
+                            "install",
+                            json!({"path":file.path(),"online":true}),
+                        );
+                        catalog_file = Some(file);
+                    }
+                    Err(error) => {
+                        ui.set_catalog_status(format!("读取失败 · {error}").into());
+                        ui.set_catalog_busy(false);
+                    }
+                }
+            }
             while let Ok(reply) = out_rx.try_recv() {
+                if reply.op == "install" && reply.args["online"] == true {
+                    drop(catalog_file.take());
+                    ui.set_catalog_busy(false);
+                    ui.set_catalog_status(
+                        match &reply.value {
+                            Ok(m) => format!(
+                                "{} 已导入，可在插件列表查看启用状态",
+                                m["name"].as_str().unwrap_or("插件")
+                            ),
+                            Err(e) => format!("导入失败 · {e}"),
+                        }
+                        .into(),
+                    );
+                }
+                if reply.op == "download" {
+                    let key =
+                        serde_json::from_value::<ResourceKey>(reply.args["track"]["key"].clone());
+                    if let Ok(key) = key {
+                        let title = reply.args["track"]["title"].as_str().unwrap_or_default();
+                        let error = match reply.value {
+                            Ok(Value::String(_)) => None,
+                            Err(e) => Some(e),
+                            _ => continue,
+                        };
+                        let message = match &error {
+                            Some(e) => format!("《{title}》下载失败：{e}"),
+                            None => format!("《{title}》已在本地音乐库"),
+                        };
+                        if s.downloads.finish(&key, error) {
+                            ui.set_download_notice(message.into());
+                            s.schedule_downloads(&ui, &job, &genr);
+                            if s.online.is_none()
+                                && s.page_source == "local"
+                                && matches!(s.last.op.as_str(), "library" | "search")
+                            {
+                                send(&job, &genr, "local", &s.last.op, s.last.args.clone());
+                            }
+                        }
+                    }
+                    continue;
+                }
                 if (["resolve", "lyrics"].contains(&reply.op.as_str())
                     && reply.generation != s.play_generation)
                     || (!["resolve", "lyrics"].contains(&reply.op.as_str())
@@ -985,10 +1217,50 @@ pub fn run_at(root: PathBuf) -> Result<()> {
                 {
                     continue;
                 }
+                if reply.op == "search" && reply.source != "local" && s.online.is_some() {
+                    let result = reply
+                        .value
+                        .and_then(|v| serde_json::from_value::<Page>(v).map_err(|e| e.to_string()))
+                        .map(|mut page| {
+                            prepare_items(
+                                &mut page.items,
+                                &s.plugins,
+                                &reply.source,
+                                &cover_tx,
+                                reply.generation,
+                            );
+                            page
+                        });
+                    s.online.as_mut().unwrap().accept(
+                        &reply.source,
+                        reply.args["offset"].as_u64().unwrap_or(0),
+                        result,
+                    );
+                    s.show_search(&ui);
+                    #[cfg(feature = "ui-smoke")]
+                    eprintln!(
+                        "Search result: source={}, visible={}, pending={}",
+                        reply.source,
+                        s.items.len(),
+                        s.online.as_ref().unwrap().pending(false)
+                    );
+                    continue;
+                }
+                if reply.op == "persist-downloads" {
+                    if let Err(error) = reply.value {
+                        ui.set_download_notice(format!("下载队列保存失败：{error}").into());
+                    }
+                    continue;
+                }
                 if reply.op == "persist" {
                     continue;
                 }
-                ui.set_busy(false);
+                if s.online
+                    .as_ref()
+                    .is_none_or(|search| search.pending(false) == 0 || !s.items.is_empty())
+                {
+                    ui.set_busy(false);
+                }
                 if ["loginStart", "loginPoll"].contains(&reply.op.as_str()) {
                     s.login_inflight = false;
                 }
@@ -1012,7 +1284,10 @@ pub fn run_at(root: PathBuf) -> Result<()> {
                         "resolve" => {
                             ui.set_has_error(false);
                             if let Some(url) = v["url"].as_str() {
-                                let _ = pc.send(Command::Open(url.into()));
+                                let _ = pc.send(Command::Open {
+                                    url: url.into(),
+                                    referrer: v["referrer"].as_str().map(str::to_owned),
+                                });
                                 let _ = pc.send(Command::Pause(false));
                                 s.loaded = true;
                                 s.playing = true;
@@ -1111,7 +1386,19 @@ pub fn run_at(root: PathBuf) -> Result<()> {
                             let old_source = s.source.clone();
                             s.plugins = serde_json::from_value(v).unwrap_or_default();
                             update_plugins(&ui, &mut s);
+                            if s.online.is_some() && s.last.op == "search" && s.source == old_source
+                            {
+                                genr.fetch_add(1, Ordering::Relaxed);
+                                s.clear_page(&ui);
+                                s.last.args["offset"] = json!(0);
+                                if s.source == "local" || !s.begin_online(&ui, &job, &genr) {
+                                    send(&job, &genr, &s.source, "search", s.last.args.clone());
+                                }
+                            }
                             if s.source != old_source {
+                                genr.fetch_add(1, Ordering::Relaxed);
+                                s.clear_page(&ui);
+                                ui.set_anonymous_source(false);
                                 s.last = Request::new("library", json!({}));
                                 s.login_started = None;
                                 s.login_key.clear();
@@ -1130,8 +1417,11 @@ pub fn run_at(root: PathBuf) -> Result<()> {
                             } else {
                                 v.to_string().into()
                             });
-                            if s.source == "local" {
-                                send(&job, &genr, "local", "library", json!({}));
+                            if s.online.is_none()
+                                && s.page_source == "local"
+                                && matches!(s.last.op.as_str(), "library" | "search")
+                            {
+                                send(&job, &genr, "local", &s.last.op, s.last.args.clone());
                             }
                         }
                         "local-playlists" => {
@@ -1153,10 +1443,36 @@ pub fn run_at(root: PathBuf) -> Result<()> {
                                 serde_json::from_value(v["links"].clone()).unwrap_or_default();
                             links.retain(|n| n.op == "browse");
                             if let Ok(mut page) = serde_json::from_value::<Page>(v) {
-                                if reply.source != s.source {
+                                if reply.source != s.page_source
+                                    || (page.offset > 0
+                                        && s.last.op == reply.op
+                                        && s.last.args["offset"].as_u64() == Some(page.offset))
+                                {
                                     continue;
                                 }
                                 s.last = Request::new(&reply.op, reply.args.clone());
+                                let local_miss = reply.source == "local"
+                                    && reply.op == "search"
+                                    && page.offset == 0
+                                    && page.items.is_empty()
+                                    && reply.args["query"]
+                                        .as_str()
+                                        .is_some_and(|q| !q.trim().is_empty());
+                                if local_miss && s.begin_online(&ui, &job, &genr) {
+                                    continue;
+                                }
+                                ui.set_search_page(reply.op == "search");
+                                ui.set_can_download(has_capability(
+                                    &s.plugins,
+                                    &reply.source,
+                                    "download",
+                                ));
+                                ui.set_page_account_actions(
+                                    s.plugins
+                                        .iter()
+                                        .find(|(m, _)| m.id == reply.source)
+                                        .is_none_or(|(m, _)| m.supports_likes()),
+                                );
                                 show_page_navigation(&ui, &mut s, links);
                                 ui.set_album_detail(reply.op == "album" && reply.source != "local");
                                 ui.set_home_page(reply.op == "home");
@@ -1167,20 +1483,13 @@ pub fn run_at(root: PathBuf) -> Result<()> {
                                     !page.items.is_empty()
                                         && page.items.iter().all(|i| i.kind != "track"),
                                 );
-                                let domains = s
-                                    .plugins
-                                    .iter()
-                                    .find(|(m, _)| m.id == reply.source)
-                                    .map(|(m, _)| m.media.clone())
-                                    .unwrap_or_default();
-                                for item in &mut page.items {
-                                    item.key.source = reply.source.clone();
-                                    if reply.source != "local"
-                                        && !music_plugin_host::media_allowed(&item.cover, &domains)
-                                    {
-                                        item.cover.clear();
-                                    }
-                                }
+                                prepare_items(
+                                    &mut page.items,
+                                    &s.plugins,
+                                    &reply.source,
+                                    &cover_tx,
+                                    reply.generation,
+                                );
                                 ui.set_heading(page.title.into());
                                 ui.set_has_error(false);
                                 ui.set_more(page.more);
@@ -1189,18 +1498,13 @@ pub fn run_at(root: PathBuf) -> Result<()> {
                                 } else {
                                     s.items = page.items;
                                 }
-                                for t in &s.items {
-                                    if t.cover.starts_with("https://") {
-                                        let _ = cover_tx.try_send(covers::Cover {
-                                            key: t.key.clone(),
-                                            url: t.cover.clone(),
-                                            domains: domains.clone(),
-                                            generation: reply.generation,
-                                        });
-                                    }
-                                }
-                                ui.set_rows(rows(&s.items));
-                                ui.set_status(format!("{} 项", s.items.len()).into());
+                                s.update_rows(&ui);
+                                let status = if local_miss {
+                                    "本地未找到匹配内容，可在设置中安装并启用在线音乐源".to_owned()
+                                } else {
+                                    format!("{} 项", s.items.len())
+                                };
+                                ui.set_status(status.into());
                             } else {
                                 ui.set_status("操作完成".into());
                             }
@@ -1208,7 +1512,51 @@ pub fn run_at(root: PathBuf) -> Result<()> {
                     },
                 }
             }
-            let mut covers_changed = false;
+            while let Ok(progress) = progress_rx.try_recv() {
+                #[cfg(feature = "ui-smoke")]
+                if progress.bytes > 0
+                    && s.downloads.index(&progress.key).is_some_and(|i| {
+                        matches!(
+                            s.downloads.0[i].phase,
+                            download::Phase::Active { bytes: 0, .. }
+                        )
+                    })
+                {
+                    eprintln!(
+                        "Download progress: source={}, bytes={}, total={:?}",
+                        progress.key.source, progress.bytes, progress.total
+                    );
+                }
+                s.show_progress(&ui, progress);
+            }
+            #[cfg(feature = "ui-smoke")]
+            if capture_download && s.online.as_ref().is_some_and(|q| q.pending(false) == 0) {
+                capture_download = false;
+                let count = std::env::var("MUSIC_API_CAPTURE_COUNT")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(1);
+                let indices: Vec<_> = s
+                    .items
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, t)| {
+                        t.kind == "track"
+                            && t.downloadable != Some(false)
+                            && has_capability(&s.plugins, &t.key.source, "download")
+                    })
+                    .take(count)
+                    .map(|(i, _)| i as i32)
+                    .collect();
+                let window = ui.as_weak();
+                slint::Timer::single_shot(Duration::ZERO, move || {
+                    if let Some(ui) = window.upgrade() {
+                        for i in indices {
+                            ui.invoke_row_action(i, "download".into());
+                        }
+                    }
+                });
+            }
             let mut queue_covers_changed = false;
             while let Ok((key, path, g)) = cover_rx.try_recv() {
                 for item in &mut s.queue.items {
@@ -1225,16 +1573,24 @@ pub fn run_at(root: PathBuf) -> Result<()> {
                     ui.set_now_cover(image_path(&path));
                 }
                 if g == genr.load(Ordering::Relaxed) {
-                    for item in &mut s.items {
+                    if let Some(search) = &mut s.online {
+                        for item in &mut search.items {
+                            if item.key == key {
+                                item.cover = path.clone();
+                            }
+                        }
+                    }
+                    for (i, item) in s.items.iter_mut().enumerate() {
                         if item.key == key {
                             item.cover = path.clone();
-                            covers_changed = true;
+                            let model = ui.get_rows();
+                            if let Some(mut row) = model.row_data(i) {
+                                row.cover = image_path(&path);
+                                model.set_row_data(i, row);
+                            }
                         }
                     }
                 }
-            }
-            if covers_changed {
-                ui.set_rows(rows(&s.items));
             }
             if queue_covers_changed {
                 refresh_queue(&ui, &s);
@@ -1328,6 +1684,8 @@ pub fn run_at(root: PathBuf) -> Result<()> {
     send(&tx, &generation, "local", "local-playlists", json!({}));
     send(&tx, &generation, "local", "scan", json!({}));
     #[cfg(feature = "ui-smoke")]
+    let capture_timer = slint::Timer::default();
+    #[cfg(feature = "ui-smoke")]
     {
         if let Ok(source) = std::env::var("MUSIC_API_CAPTURE_SOURCE") {
             let index = state.borrow().sources.iter().position(|id| id == &source);
@@ -1337,13 +1695,32 @@ pub fn run_at(root: PathBuf) -> Result<()> {
             }
         }
         if let Some(path) = std::env::var_os("MUSIC_API_CAPTURE") {
+            ui.set_guest_only(std::env::var_os("MUSIC_API_CAPTURE_GUEST").is_some());
+            ui.set_show_downloads(
+                std::env::var("MUSIC_API_CAPTURE_SCREEN").as_deref() == Ok("downloads"),
+            );
             match std::env::var("MUSIC_API_CAPTURE_THEME").as_deref() {
                 Ok("light") => ui.set_dark(false),
                 Ok("dark") => ui.set_dark(true),
                 _ => {}
             }
+            if std::env::var("MUSIC_API_CAPTURE_SCREEN").as_deref() == Ok("catalog") {
+                ui.set_show_settings(true);
+                ui.set_show_catalog(true);
+                ui.invoke_catalog_action(-1);
+            }
             if std::env::var("MUSIC_API_CAPTURE_SCREEN").as_deref() == Ok("settings") {
                 ui.set_show_settings(true);
+                if let Ok(source) = std::env::var("MUSIC_API_CAPTURE_TOGGLE") {
+                    let index = state
+                        .borrow()
+                        .plugins
+                        .iter()
+                        .position(|(m, _)| m.id == source);
+                    if let Some(index) = index {
+                        ui.invoke_plugin_action(index as i32, "toggle".into());
+                    }
+                }
             }
             let window = ui.as_weak();
             if let Some(index) = std::env::var("MUSIC_API_CAPTURE_LINK")
@@ -1410,18 +1787,49 @@ pub fn run_at(root: PathBuf) -> Result<()> {
                     }
                 });
             }
-            slint::Timer::single_shot(Duration::from_secs(15), move || {
+            let retry_download = std::env::var_os("MUSIC_API_CAPTURE_RETRY").is_some();
+            if retry_download {
+                let queue_window = ui.as_weak();
+                slint::Timer::single_shot(Duration::from_secs(1), move || {
+                    if let Some(ui) = queue_window.upgrade() {
+                        let queue = ui.get_downloads();
+                        if let Some(i) = (0..queue.row_count())
+                            .find(|&i| queue.row_data(i).is_some_and(|r| r.failed))
+                        {
+                            ui.invoke_download_action(i as i32, "retry".into());
+                        }
+                    }
+                });
+            }
+            let wait_for_download =
+                retry_download || std::env::var_os("MUSIC_API_CAPTURE_DOWNLOAD").is_some();
+            let started = Instant::now();
+            let interval = if wait_for_download {
+                Duration::from_millis(500)
+            } else {
+                Duration::from_secs(15)
+            };
+            capture_timer.start(slint::TimerMode::Repeated, interval, move || {
                 if let Some(ui) = window.upgrade() {
+                    if ui.get_show_catalog() && ui.get_catalog_busy() && started.elapsed() < Duration::from_secs(120) { return; }
+                    if ui.get_show_catalog() { eprintln!("Online catalog: rows={}, status={}",ui.get_catalog_rows().row_count(),ui.get_catalog_status()); }
+                    if wait_for_download && !ui.get_has_error() && started.elapsed() < Duration::from_secs(120) &&
+                        (ui.get_download_notice().is_empty() || ui.get_download_pending() > 0) { return; }
                     eprintln!(
-                        "UI state: heading={}, tab={}, title={}, position={}, duration={}, playing={}, status={}",
+                        "UI state: heading={}, tab={}, title={}, position={}, duration={}, playing={}, rows={}, status={}, download={}",
                         ui.get_heading(),
                         ui.get_page_tab_index(),
                         ui.get_now_title(),
                         ui.get_position(),
                         ui.get_duration(),
                         ui.get_playing(),
-                        ui.get_status()
+                        ui.get_rows().row_count(),
+                        ui.get_status(),
+                        ui.get_download_notice()
                     );
+                    for i in 0..ui.get_downloads().row_count() {
+                        if let Some(entry)=ui.get_downloads().row_data(i) { eprintln!("Download task: {} | {}",entry.title,entry.status); }
+                    }
                     match ui.window().take_snapshot() {
                         Ok(pixels) => {
                             let result = image::save_buffer(
@@ -1445,6 +1853,14 @@ pub fn run_at(root: PathBuf) -> Result<()> {
     let s = state.borrow();
     let shutdown_db = Library::open(&root)?;
     shutdown_db.set("queue", json!(s.queue))?;
+    shutdown_db.set("download-queue", s.downloads.snapshot())?;
+    send(
+        &tx,
+        &generation,
+        "local",
+        "persist-downloads",
+        s.downloads.snapshot(),
+    );
     shutdown_db.set("dark", json!(ui.get_dark()))?;
     send(
         &tx,
@@ -1456,7 +1872,38 @@ pub fn run_at(root: PathBuf) -> Result<()> {
     let _ = ptx.send(Command::Quit);
     Ok(())
 }
+fn update_catalog_rows(ui: &AppWindow, s: &UiState) {
+    ui.set_catalog_rows(ModelRc::new(VecModel::from(
+        s.catalog
+            .iter()
+            .map(|entry| {
+                let installed = s.plugins.iter().find(|(m, _)| m.id == entry.id);
+                let same = installed.is_some_and(|(m, _)| m.version == entry.version);
+                CatalogRow {
+                    title: format!("{}  {}", entry.name, entry.version).into(),
+                    description: entry.description.as_str().into(),
+                    permissions: format!(
+                        "API · {}   媒体 · {}",
+                        entry.network.join(", "),
+                        entry.media.join(", ")
+                    )
+                    .into(),
+                    action_label: if same {
+                        "已安装"
+                    } else if installed.is_some() {
+                        "更新"
+                    } else {
+                        "安装"
+                    }
+                    .into(),
+                    can_install: !same,
+                }
+            })
+            .collect::<Vec<_>>(),
+    )));
+}
 fn update_plugins(ui: &AppWindow, s: &mut UiState) {
+    update_catalog_rows(ui, s);
     let mut names = vec!["本地音乐".into()];
     s.sources = vec!["local".into()];
     for (m, on) in &s.plugins {
@@ -1466,15 +1913,13 @@ fn update_plugins(ui: &AppWindow, s: &mut UiState) {
         }
     }
     ui.set_sources(ModelRc::new(VecModel::from(names)));
-    ui.set_plugin_names(ModelRc::new(VecModel::from(
+    ui.set_plugin_rows(ModelRc::new(VecModel::from(
         s.plugins
             .iter()
-            .map(|(m, on)| {
-                format!(
-                    "{} {} · {}\nAPI: {}\n媒体: {}",
-                    m.name,
-                    m.version,
-                    if *on { "已启用" } else { "已停用" },
+            .map(|(m, enabled)| PluginRow {
+                name: format!("{}  {}", m.name, m.version).into(),
+                permissions: format!(
+                    "API · {}\n媒体 · {}",
                     m.network.join(", "),
                     if m.media.is_empty() {
                         "HTTPS 媒体地址".into()
@@ -1482,14 +1927,18 @@ fn update_plugins(ui: &AppWindow, s: &mut UiState) {
                         m.media.join(", ")
                     }
                 )
-                .into()
+                .into(),
+                enabled: *enabled,
             })
             .collect::<Vec<_>>(),
     )));
-    if !s.sources.contains(&s.source) {
+    if let Some(index) = s.sources.iter().position(|id| id == &s.source) {
+        ui.set_source_index(index as i32);
+    } else {
         s.source = "local".into();
         s.nav = local_nav();
         ui.set_source_index(0);
+        ui.set_has_quality_setting(false);
         show_nav(ui, s);
     }
 }

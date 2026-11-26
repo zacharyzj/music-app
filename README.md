@@ -1,23 +1,36 @@
 # music-app
 
-Slint + Rust + libmpv 音乐播放器，使用 QuickJS 执行独立 JavaScript 音乐源。默认只提供本地音乐。网易云插件单独安装，不需要 Flutter、Node.js 或外部 API 服务。
+Slint + Rust + libmpv 音乐播放器，使用 QuickJS 执行独立 JavaScript 音乐源。默认只提供本地音乐。网易云、哔哩哔哩、24bit、Audius 和 Incompetech 音乐源均可单独安装。运行播放器无需安装 Flutter 或 Node.js，也无需自行部署 API 服务。
 
-当前版本为 **0.2.5**，应用内名称为 Music Player。版本和工具链分别由 [Cargo.toml](Cargo.toml) 与 [rust-toolchain.toml](rust-toolchain.toml) 管理。
+当前版本为 **0.2.9**，应用内名称为 Music Player。版本和工具链分别由 [Cargo.toml](Cargo.toml) 与 [rust-toolchain.toml](rust-toolchain.toml) 管理。
 
 ## Windows 使用
 
-解压 `dist/MusicPlayer-windows-x64-0.2.5.zip`，运行 `music-app.exe`，保留同目录的 `mpv-2.dll`。
+解压 `dist/MusicPlayer-windows-x64-0.2.9.zip`，运行 `music-app.exe`，保留同目录的 `mpv-2.dll`。
 
 `dist/` 为本地构建产物，不随 Git 仓库分发；首次克隆请按下文构建。
 
 1. 设置与插件 → 添加音乐目录，扫描标签、封面和同名 `.lrc`。
-2. 可选：安装 `dist/netease.ypm.zip`，查看网络权限并启用，再从左侧切换网易云音乐。
-3. 支持搜索、推荐、排行榜、歌单、专辑、歌手、歌词和扫码登录；每日推荐、我的云盘、个人收藏需要登录。
+2. 在「设置与插件」打开「在线插件」，从 GitHub 列表选择音乐源并点击「安装」。也可以粘贴其他 HTTPS 索引或插件 ZIP 的地址，或用「导入本地 ZIP」。安装后点击「启用」，卡片会以主题色高亮。再次点击「已启用」可停用。
+3. 网易云音乐支持搜索、推荐、排行榜、歌单、专辑、歌手、歌词和扫码登录。每日推荐、我的云盘、个人收藏需要登录。
 4. 歌曲行的 ＋ 默认加入队列；设置中选定本地歌单后，本地歌曲的 ＋ 加入该歌单。底栏提供歌词页、队列、循环、随机和音量。F7 播放/暂停，F8 下一首。
 
 Windows 跨屏拖动按屏幕长边、短边计算统一缩放倍数，保持窗口长宽比，支持横竖屏切换。界面与输入坐标按目标 DPI 更新，最小内容区为 720×480 逻辑像素。具体规则与测试结果见 [验收记录](docs/validation.md)。
 
 支持拖动边框调整大小、双击标题栏及最大化。窄窗口自动调整侧栏、播放栏和列表，封面切换为两列。Windows 11 标题栏的背景、文字与边框跟随应用深浅主题；更早系统使用原生深浅主题。
+
+### 本地搜索与下载
+
+在「设置与插件」中导入并启用想用的音乐源，然后回到「本地音乐」搜索。本地有匹配时直接显示本地结果。本地没有匹配时，播放器同时搜索支持该类型的已启用音乐源，结果随各源返回逐批显示。可以切换来源，或点「仅看免登录可下载」查看发布者明确开放完整下载的歌曲。同名录音保留各自的歌手、来源和下载状态。
+
+- **24bit 无损音乐** 使用官网的两个游客搜索分库，支持按歌名和歌手查找录音。播放时读取歌曲页的公开音轨。点击下载才向站点查询本次下载额度，额度用完时会显示原因。
+- **哔哩哔哩** 支持游客搜索 B 站视频，结果显示标题、UP 主和时长。可直接播放视频第一分 P 的音轨。选择该源后，点击侧栏「登录」，用哔哩哔哩 App 扫码确认。本地搜不到歌曲时，已启用的 B 站也会参与并行搜索。「仅看免登录可下载」会过滤 B 站结果。
+- **Audius 音乐** 可以免登录、免 API Key 搜索中文流行、独立音乐和翻唱。输入「七里香」可以查找同名录音，输入「不动守候」可以找到 MUGUNASHII 的繁体标题《不動守候》。只有发布者向游客开放了完整下载的录音才会显示可点击的「下载」。歌曲下载入库后，也可用简体或繁体歌名离线搜索。列表显示 Audius 上的发布者名称。切换到该源的首页可发现开放下载的华语音乐。[平台下载设置](https://help.audius.co/product/editing-your-release)
+- **Incompetech 开放音乐** 支持按曲名、乐器或作者 Kevin MacLeod 检索，无需账号或 API Key。可用 `Monkeys Spinning Monkeys` 试搜。下载的 MP3 旁会保存同名 `.attribution.txt`，内含作者、作品页和 CC BY 4.0 许可链接。[官方曲库说明](https://incompetech.com/agent-section/)
+- **网易云音乐** 支持按歌曲、专辑、歌手和歌单检索。登录后点击歌曲右侧的「下载」，由网易云下载接口按当前账号和所选音质决定是否提供完整音频。旧版插件可以直接导入新版升级。
+- 连续点击多首歌的「下载」即可按顺序排队。左侧「下载队列」显示已传输字节，已知总大小时也显示百分比。等待中的任务可移除，失败任务可重试。重启后会重新获取下载地址并从头下载未完成的任务。
+- Incompetech 用户可在「设置与插件」直接导入 1.0.1 版本，让开放曲目进入免登录筛选。
+- 下载成功后立即加入本地音乐库，可离线搜索和播放。Windows 默认保存到 `%APPDATA%/music-api/MusicPlayer/data/downloads`，设置了 `MUSIC_API_DATA_DIR` 时使用该目录下的 `downloads`。
 
 0.1.x 升级：导入新版 JS 插件即可沿用同一 `netease` ID 的加密会话、设备标识和音质设置。不要先卸载旧源；卸载会清除该源的账号数据。新版不加载 `.wasm`，旧文件保留供旧程序使用。不要同时运行两个版本并修改同一账号或音乐库。
 
@@ -43,12 +56,12 @@ cargo run -p music-app --locked
 `get-mpv.ps1` 下载固定版本的 libmpv 并校验 SHA-256。生成 Windows 发布包：
 
 ```powershell
-./scripts/build-windows.ps1 -OutputName MusicPlayer-windows-x64-0.2.5
+./scripts/build-windows.ps1 -OutputName MusicPlayer-windows-x64-0.2.9
 ```
 
-发布包位于 `dist/MusicPlayer-windows-x64-0.2.5.zip`；可选网易云插件位于 `dist/netease.ypm.zip`。打包脚本会重新构建插件和 release 主程序，`-Debug` 可生成调试包。
+发布包位于 `dist/MusicPlayer-windows-x64-0.2.9.zip`；可选插件为 `dist/netease.ypm.zip`、`dist/bilibili.ypm.zip`、`dist/24bit.ypm.zip`、`dist/audius.ypm.zip` 和 `dist/incompetech.ypm.zip`。打包脚本会重新构建插件和 release 主程序，`-Debug` 可生成调试包。
 
-主程序包不预装在线源。`cargo xtask plugin` 将 `plugins/netease-js` 打包为 `.ypm.zip`。安装器也接受兼容的 YesPlayMusic 插件 ZIP，支持根目录或一层外包装目录中的 `plugin.json`。本宿主实现了网易云使用的 API 子集，不承诺兼容所有 YesPlayMusic 扩展能力。
+主程序包不预装在线源。`cargo xtask plugin` 分别将五个音乐源打包为 `.ypm.zip`。安装器也接受兼容的 YesPlayMusic 插件 ZIP，支持根目录或一层外包装目录中的 `plugin.json`。本宿主实现了网易云使用的 API 子集，不承诺兼容所有 YesPlayMusic 扩展能力。
 
 libmpv 在运行时动态加载，无需开发头文件。macOS 使用 `libmpv.2.dylib`，Linux 使用 `libmpv.so.2`；可用 `MUSIC_API_MPV` 指定路径。
 
@@ -82,6 +95,10 @@ cargo xtask probe-account "$env:APPDATA/music-api/MusicPlayer/data"
 | `crates/player` | libmpv 动态 API、播放器线程 |
 | `crates/plugin-host` | QuickJS、模块加载、YPM 适配、权限与加密存储 |
 | `crates/app` | Slint 页面、后台任务、封面缓存 |
+| `plugins/24bit-js` | 24bit 双库搜索、公开音轨及按站点额度下载 |
+| `plugins/bilibili-js` | 哔哩哔哩视频搜索、音轨播放及扫码登录插件 |
+| `plugins/audius-js` | Audius 公开曲库 JS 插件，支持简繁体搜索和按曲下载 |
+| `plugins/incompetech-js` | Kevin MacLeod 开放曲库 JS 插件 |
 | `plugins/netease-js` | 网易云 JS 插件，基于 MIT 上游源码 |
 | `xtask` | JS 打包、联网探测及真实播放检查 |
 | `scripts` | Windows 原生依赖下载与发布包构建 |
@@ -103,6 +120,6 @@ cargo xtask probe-account "$env:APPDATA/music-api/MusicPlayer/data"
 
 本次交付 Windows x64。macOS/Linux 与 Android 交叉检查已配置 CI，未在本机完成运行验收。Android 的 SAF、Keystore、音频焦点、后台服务和 libmpv 打包尚未适配，不提供 APK。
 
-界面提供明暗主题、封面卡片、歌曲列表、歌词和队列；未实现 Coverflow、托盘、媒体系统快捷键、下载、云盘上传或插件市场。
+界面提供明暗主题、封面卡片、歌曲列表、歌词和队列；未实现 Coverflow、托盘、媒体系统快捷键、云盘上传或插件市场。
 
 详见 [插件协议](docs/plugins.md)、[验收记录](docs/validation.md)、[第三方授权说明](THIRD_PARTY_NOTICES.md)。

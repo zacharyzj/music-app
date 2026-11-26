@@ -19,4 +19,4 @@ Copy-Item -LiteralPath $mpv -Destination $package
 Copy-Item README.md,THIRD_PARTY_NOTICES.md -Destination $package
 Copy-Item -Path docs -Destination $package -Recurse -Force
 Compress-Archive -Path "$package/*" -DestinationPath "dist/$OutputName.zip" -Force
-Write-Output "Player: dist/$OutputName.zip; optional source: dist/netease.ypm.zip"
+Write-Output "Player: dist/$OutputName.zip; optional sources: dist/netease.ypm.zip, dist/incompetech.ypm.zip, dist/audius.ypm.zip, dist/bilibili.ypm.zip, dist/24bit.ypm.zip; online index: dist/plugins.json"

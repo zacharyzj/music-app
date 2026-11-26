@@ -300,15 +300,17 @@ export async function browse({ page = "" }) {
   };
 }
 
-export async function stream({ id: value, quality = "high" }) {
+function qualityLevels(quality) {
   const levels = { hires: "hires", lossless: "lossless", high: "exhigh", standard: "standard" };
   const order = Object.keys(levels);
   const setting = typeof host.setting === "function" ? host.setting("quality") : "";
-  // 插件设置优先于宿主的默认档位；空设置保留原来的跟随行为。
   const selected = order.includes(setting) ? setting : order.includes(quality) ? quality : "high";
+  return order.slice(order.indexOf(selected)).map(candidate => levels[candidate]);
+}
+
+export async function stream({ id: value, quality = "high" }) {
   const songId = id(value);
-  for (const candidate of order.slice(order.indexOf(selected))) {
-    const level = levels[candidate];
+  for (const level of qualityLevels(quality)) {
     const j = await api("/api/song/enhance/player/url/v1", { ids: JSON.stringify([songId]), level, encodeType: "flac" });
     const s = j.data?.[0];
     // 无完整音频时只向下尝试；登录失效、网络和验证错误由 api 原样报告。
@@ -317,6 +319,20 @@ export async function stream({ id: value, quality = "high" }) {
     return { url: s.url.replace(/^http:\/\//i, "https://"), type: s.type || "mp3", quality: s.level || level, bitRate: s.br || 0, size: s.size || 0 };
   }
   fail("unavailable", hasSession() ? "此歌曲需要会员、单独购买，或当前地区无版权；不会以试听片段代替完整歌曲" : "此歌曲需要登录或相应会员权限，请先扫码登录网易云音乐");
+}
+
+export async function download({ id: value, quality = "high" }) {
+  requireAccount();
+  const songId = id(value);
+  const [level] = qualityLevels(quality);
+  const j = await api("/api/song/enhance/download/url/v1", { id: songId, level, immerseType: "c51" });
+  const file = Array.isArray(j.data) ? j.data[0] : j.data;
+  if (!file?.url || (file.code != null && Number(file.code) !== 200) ||
+      (file.id != null && String(file.id) !== String(songId)) ||
+      (file.freeTrialInfo && file.freeTrialInfo !== "null") || !/^https?:\/\//i.test(file.url)) {
+    fail("unavailable", "当前网易云账号没有这首歌所选音质的完整下载权限");
+  }
+  return { url: file.url.replace(/^http:\/\//i, "https://"), size: Number(file.size) || 0 };
 }
 
 export async function lyrics({ id: value }) {

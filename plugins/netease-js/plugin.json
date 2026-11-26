@@ -1,9 +1,10 @@
 {
   "id": "netease",
   "name": "网易云音乐",
-  "version": "1.2.0+music.1",
-  "description": "网易云曲库、歌单、歌词与扫码登录。播放遵循账号会员、地区和版权权限，不提供解锁或下载。",
+  "version": "1.2.0+music.2",
+  "description": "网易云曲库、歌单、歌词与扫码登录。播放和下载遵循网易云账号权限。",
   "main": "index.js",
+  "capabilities": ["download"],
   "playback": "stream",
   "permissions": {
     "network": [

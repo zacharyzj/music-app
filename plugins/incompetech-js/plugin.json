@@ -1,0 +1,13 @@
+{
+  "id": "incompetech",
+  "name": "Incompetech 开放音乐",
+  "version": "1.0.1",
+  "description": "免登录搜索和下载 Kevin MacLeod 的 CC BY 4.0 音乐。",
+  "main": "index.js",
+  "playback": "stream",
+  "capabilities": ["download", "anonymous", "tracksOnly"],
+  "permissions": {
+    "network": ["incompetech.com"],
+    "media": ["incompetech.com"]
+  }
+}

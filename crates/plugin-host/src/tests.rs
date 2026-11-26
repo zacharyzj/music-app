@@ -218,3 +218,404 @@ fn upstream_login_rotates_qr_and_commits_verified_account() {
     );
     assert_eq!(s.host.borrow().storage.get("account")["id"], "42");
 }
+
+#[test]
+fn netease_download_checks_the_account_and_download_grant() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = session(upstream(), dir.path());
+    let request = || Request::new("download", json!({"id":"7"}));
+    assert!(s.call(request()).unwrap_err().to_string().contains("登录"));
+    {
+        let mut host = s.host.borrow_mut();
+        host.storage.set("account", json!({"id":"1"})).unwrap();
+        host.storage
+            .set("cookies", json!({"MUSIC_U":"fixture"}))
+            .unwrap();
+        host.fixture = Some(json!({"song/enhance/download/url/v1":{"responses":[
+            {"code":200,"data":{"id":7,"code":403,"url":"https://m1.music.126.net/denied.mp3"}},
+            {"code":200,"data":{"id":7,"code":200,"url":"https://m1.music.126.net/trial.mp3","freeTrialInfo":{"start":0,"end":30}}},
+            {"code":200,"data":{"id":7,"code":200,"url":"http://m1.music.126.net/complete.flac","size":1042}}
+        ]}}));
+    }
+    for _ in 0..2 {
+        assert!(
+            s.call(request())
+                .unwrap_err()
+                .to_string()
+                .contains("下载权限")
+        );
+    }
+    assert_eq!(
+        s.call(request()).unwrap(),
+        json!({"url":"https://m1.music.126.net/complete.flac","size":1042})
+    );
+}
+
+#[test]
+fn open_catalog_search_and_download_share_a_stable_recording_and_credit() {
+    let directory = tempfile::tempdir().unwrap();
+    let bytes = bundle(Path::new(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../plugins/incompetech-js"
+    )))
+    .unwrap();
+    let mut s = session(Package::read(&bytes).unwrap(), directory.path());
+    s.host.borrow_mut().fixture = Some(json!({
+        "https://incompetech.com/music/royalty-free/pieces.json": [
+            {"title":"Open song","isrc":"US123","filename":"Open #1.mp3","length":"00:02:05","instruments":"piano"},
+            {"title":"Broken","isrc":"US456","filename":"../other.mp3"}
+        ]
+    }));
+    let page = s
+        .call(Request::new(
+            "search",
+            json!({"kind":"track","query":"piano"}),
+        ))
+        .unwrap();
+    let item = &page["items"][0];
+    assert_eq!(item["key"], json!({"source":"incompetech","id":"US123"}));
+    assert_eq!(item["duration_ms"], 125000);
+    assert_eq!(item["license"], "CC BY 4.0");
+    let media = s
+        .call(Request::new("download", json!({"id":"US123"})))
+        .unwrap();
+    assert_eq!(
+        media["url"],
+        "https://incompetech.com/music/royalty-free/mp3-royaltyfree/Open%20%231.mp3"
+    );
+    assert!(
+        media["attribution"]
+            .as_str()
+            .unwrap()
+            .contains("https://creativecommons.org/licenses/by/4.0/")
+    );
+    assert!(
+        s.call(Request::new("download", json!({"id":"US456"})))
+            .is_err()
+    );
+}
+
+fn audius_session(dir: &Path) -> Session {
+    let bytes = bundle(Path::new(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../plugins/audius-js"
+    )))
+    .unwrap();
+    session(Package::read(&bytes).unwrap(), dir)
+}
+
+#[test]
+fn audius_checks_each_recording_again_before_anonymous_download_or_playback() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = audius_session(dir.path());
+    let search = "https://api.audius.co/v1/tracks/search?limit=51&query=pop&offset=0";
+    let detail = "https://api.audius.co/v1/tracks/abc";
+    let open = json!({"id":"abc","title":"不動守候","user":{"name":"MUGUNASHII"},"duration":206,
+        "is_streamable":true,"is_stream_gated":false,"is_downloadable":true,"is_download_gated":false,
+        "access":{"stream":true,"download":true}, "permalink":"/mugunashii/不動守候",
+        "stream":{"url":"https://creatornode.audius.co/play"},
+        "download":{"url":"https://unlisted.example/file?signature=fixture",
+                    "mirrors":["https://invalid.example","https://val001.open-audio-validator.com"]}});
+    let mut disabled = open.clone();
+    disabled["is_downloadable"] = json!(false);
+    let mut gated = open.clone();
+    gated["download_conditions"] = json!({"follow_user_id":42});
+    let mut denied = open.clone();
+    denied["access"]["download"] = json!(false);
+    let mut blocked_stream = open.clone();
+    blocked_stream["is_streamable"] = json!(false);
+    s.host.borrow_mut().fixture = Some(json!({
+        (search):{"data":[open,disabled,gated,denied,blocked_stream]},
+        (detail):{"responses":[{"data":disabled},{"data":gated},{"data":denied},{"data":open},{"data":blocked_stream}]}
+    }));
+    let result = s
+        .call(Request::new(
+            "search",
+            json!({"kind":"track","query":"pop"}),
+        ))
+        .unwrap();
+    let rows = result["items"].as_array().unwrap();
+    assert_eq!(
+        rows.iter()
+            .map(|r| r["downloadable"].as_bool().unwrap())
+            .collect::<Vec<_>>(),
+        [true, false, false, false, true]
+    );
+    assert_eq!(rows[4]["unavailable"], true);
+    assert_eq!(rows[0]["search_aliases"], json!(["不动守候"]));
+    let request = || Request::new("download", json!({"id":"abc"}));
+    for _ in 0..3 {
+        assert!(
+            s.call(request())
+                .unwrap_err()
+                .to_string()
+                .contains("免登录下载")
+        );
+    }
+    let media = s.call(request()).unwrap();
+    assert_eq!(
+        media["url"],
+        "https://val001.open-audio-validator.com/file?signature=fixture"
+    );
+    assert!(
+        media["attribution"]
+            .as_str()
+            .unwrap()
+            .contains("https://audius.co/mugunashii/不動守候")
+    );
+    assert!(
+        s.call(Request::new("stream", json!({"id":"abc"})))
+            .unwrap_err()
+            .to_string()
+            .contains("完整播放")
+    );
+}
+
+#[test]
+fn audius_keeps_the_matching_chinese_spelling_for_pagination() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = audius_session(dir.path());
+    let endpoint = |query: &str, offset: &str| {
+        let mut url = url::Url::parse("https://api.audius.co/v1/tracks/search").unwrap();
+        url.query_pairs_mut()
+            .append_pair("limit", "51")
+            .append_pair("query", query)
+            .append_pair("offset", offset);
+        url.to_string()
+    };
+    let rows: Vec<_> = (0..51)
+        .map(|id| json!({"id":format!("s{id}"),"title":"不動守候"}))
+        .collect();
+    s.host.borrow_mut().fixture = Some(json!({
+        (endpoint("不动守候", "0")):{"data":[]},
+        (endpoint("不動守候", "0")):{"data":rows},
+        (endpoint("不動守候", "50")):{"data":[rows[50]]}
+    }));
+    let search = |offset| {
+        Request::new(
+            "search",
+            json!({"kind":"track","query":"不动守候","offset":offset}),
+        )
+    };
+    let first = s.call(search(0)).unwrap();
+    assert_eq!(first["more"], true);
+    assert_eq!(first["items"].as_array().unwrap().len(), 50);
+    let next = s.call(search(50)).unwrap();
+    assert_eq!(next["items"][0]["key"]["id"], "s50");
+    assert_eq!(next["more"], false);
+}
+
+fn bilibili(root: &Path) -> Session {
+    let bytes = bundle(Path::new(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../plugins/bilibili-js"
+    )))
+    .unwrap();
+    session(Package::read(&bytes).unwrap(), root)
+}
+
+#[test]
+fn bilibili_search_uses_issued_cookies_and_resolves_video_audio() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = bilibili(dir.path());
+    let m = s.host.borrow().package.manifest.clone();
+    assert_eq!(m.search_page_size.unwrap().get(), 20);
+    assert!(!m.supports_likes());
+    assert!(
+        !m.capabilities
+            .iter()
+            .any(|c| c == "download" || c == "anonymous")
+    );
+    let bv = "BV123456789a";
+    let video = json!({"bvid":bv,"title":"<em class=\"keyword\">晴天</em> &amp; 现场","author":"UP&#39;主","duration":"1:02:03","pic":"//i0.hdslb.com/photo.jpg"});
+    let keyword = "%E6%99%B4%E5%A4%A9";
+    let entry = format!("https://search.bilibili.com/all?keyword={keyword}");
+    let query = format!(
+        "https://api.bilibili.com/x/web-interface/search/type?search_type=video&keyword={keyword}"
+    );
+    let view = format!("https://api.bilibili.com/x/web-interface/view?bvid={bv}");
+    let play = format!("https://api.bilibili.com/x/player/playurl?bvid={bv}&cid=99&fnval=16");
+    s.host.borrow_mut().fixture = Some(json!({
+        (entry):{"_expectCookie":"","_cookies":["buvid3=visitor; Path=/","unrelated=ignored; Path=/"]},
+        (format!("{query}&page=1")):{"_expectCookie":"buvid3=visitor","code":0,"data":{"numPages":2,"result":[video]}},
+        (format!("{query}&page=2")):{"_expectCookie":"buvid3=visitor; SESSDATA=user","code":0,"data":{"numPages":2,"result":[]}},
+        (view):{"_expectCookie":"SESSDATA=user","code":0,"data":{"pages":[{"cid":99},{"cid":100}]}},
+        (play):{"_expectCookie":"SESSDATA=user","code":0,"data":{"dash":{"audio":[{"bandwidth":20,"base_url":"https://elsewhere.example/audio","backupUrl":["https://hdslb.bilivideo.com/public.m4s"]},{"bandwidth":10,"baseUrl":"https://cdn.bilivideo.cn/other"}]}}}
+    }));
+    let args = json!({"query":"晴天", "kind":"track"});
+    let page = s.call(Request::new("search", args.clone())).unwrap();
+    let row = &page["items"][0];
+    assert_eq!(row["key"], json!({"source":"bilibili","id":bv}));
+    assert_eq!(row["title"], "晴天 & 现场");
+    assert_eq!(row["artist"], "UP'主");
+    assert_eq!(row["duration_ms"], 3_723_000);
+    assert_eq!(row["cover"], "https://i0.hdslb.com/photo.jpg");
+    assert_eq!(row["downloadable"], false);
+    assert_eq!(page["more"], true);
+    s.host
+        .borrow_mut()
+        .storage
+        .set("session", json!({"SESSDATA":"user"}))
+        .unwrap();
+    let page = s
+        .call(Request::new("search", json!({"query":"晴天","offset":20})))
+        .unwrap();
+    assert_eq!(page["more"], false);
+    assert_eq!(
+        s.call(Request::new("stream", json!({"id":bv}))).unwrap(),
+        json!({"url":"https://hdslb.bilivideo.com/public.m4s","referrer":"https://www.bilibili.com/video/BV123456789a/"})
+    );
+    s.host.borrow_mut().fixture.as_mut().unwrap()[format!("{query}&page=1")] = json!({"code":-352});
+    assert!(
+        s.call(Request::new("search", args))
+            .unwrap_err()
+            .to_string()
+            .contains("限制")
+    );
+}
+
+#[test]
+fn bilibili_qr_verifies_before_saving_and_supports_sign_out() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = bilibili(dir.path());
+    assert!(
+        s.call(Request::new("account", json!({})))
+            .unwrap()
+            .is_null()
+    );
+    s.host
+        .borrow_mut()
+        .storage
+        .set("session", json!({"SESSDATA":"previous"}))
+        .unwrap();
+    let passport = "https://passport.bilibili.com/x/passport-login/web/qrcode/";
+    let qr = "https://account.bilibili.com/h5/account-h5/auth/scan-web";
+    let nav = "https://api.bilibili.com/x/web-interface/nav";
+    s.host.borrow_mut().fixture = Some(json!({
+        (format!("{passport}generate")):{"responses":[
+            {"code":0,"data":{"url":format!("{qr}/first"),"qrcode_key":"first"}},
+            {"code":0,"data":{"url":format!("{qr}/second"),"qrcode_key":"second"}}]},
+        (format!("{passport}poll?qrcode_key=first")):{"responses":[
+            {"code":0,"data":{"code":86101}},{"code":0,"data":{"code":86090}},{"code":0,"data":{"code":86038}}]},
+        (format!("{passport}poll?qrcode_key=second")):{"code":0,"_cookies":["SESSDATA=verified; Path=/; HttpOnly","other=skip; Path=/"],"data":{"code":0}},
+        (nav):{"_expectCookie":"SESSDATA=verified","code":0,"data":{"isLogin":true,"mid":37,"uname":"B站测试"}}
+    }));
+    s.eval::<()>("const now=Date.now;let t=0;Date.now=()=>now()+t")
+        .unwrap();
+    let start = s.call(Request::new("loginStart", json!({}))).unwrap();
+    assert!(start["qr"].as_str().unwrap().ends_with("/first"));
+    let mut poll = || -> Value {
+        s.eval::<()>("t+=2100").unwrap();
+        s.call(Request::new("loginPoll", json!({"key":start["key"]})))
+            .unwrap()
+    };
+    assert!(poll()["message"].as_str().unwrap().contains("扫码"));
+    assert!(poll()["message"].as_str().unwrap().contains("已扫码"));
+    assert!(poll()["qr"].as_str().unwrap().ends_with("/second"));
+    let confirmed = poll();
+    assert_eq!(confirmed["status"], "success");
+    assert_eq!(confirmed["account"]["name"], "B站测试");
+    assert_eq!(
+        s.host.borrow().storage.get("session"),
+        json!({"SESSDATA":"verified"})
+    );
+    drop(s);
+    let mut reopened = bilibili(dir.path());
+    reopened.host.borrow_mut().fixture = Some(
+        json!({(nav):{"_expectCookie":"SESSDATA=verified","code":0,"data":{"isLogin":true,"mid":37,"uname":"B站测试"}}}),
+    );
+    assert_eq!(
+        reopened.call(Request::new("account", json!({}))).unwrap()["id"],
+        "37"
+    );
+    reopened.call(Request::new("signOut", json!({}))).unwrap();
+    assert!(reopened.host.borrow().storage.get("session").is_null());
+}
+
+#[test]
+fn bilibili_failed_relogin_preserves_previous_session() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = bilibili(dir.path());
+    s.host
+        .borrow_mut()
+        .storage
+        .set("session", json!({"SESSDATA":"previous"}))
+        .unwrap();
+    s.host.borrow_mut().fixture = Some(json!({
+        "https://passport.bilibili.com/x/passport-login/web/qrcode/generate":{"code":0,"data":{"url":"https://account.bilibili.com/scan","qrcode_key":"new"}},
+        "https://passport.bilibili.com/x/passport-login/web/qrcode/poll?qrcode_key=new":{"code":0,"data":{"code":0,"url":"https://passport.biligame.com/crossDomain?SESSDATA=unverified&ignored=ignore"}},
+        "https://api.bilibili.com/x/web-interface/nav":{"_expectCookie":"SESSDATA=unverified","code":-101}
+    }));
+    s.eval::<()>("const now=Date.now;let t=0;Date.now=()=>now()+t")
+        .unwrap();
+    let start = s.call(Request::new("loginStart", json!({}))).unwrap();
+    s.eval::<()>("t+=2100").unwrap();
+    assert!(
+        s.call(Request::new("loginPoll", json!({"key":start["key"]})))
+            .unwrap_err()
+            .to_string()
+            .contains("未确认账号")
+    );
+    assert_eq!(
+        s.host.borrow().storage.get("session")["SESSDATA"],
+        "previous"
+    );
+}
+
+#[test]
+fn twenty_four_bit_combines_banks_and_requires_a_fresh_download_grant() {
+    let root = tempfile::tempdir().unwrap();
+    let pkg = Package::read(
+        &bundle(Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../plugins/24bit-js"
+        )))
+        .unwrap(),
+    )
+    .unwrap();
+    let mut s = session(pkg, root.path());
+    let query = json!({"keyword":"%E6%99%B4%E5%A4%A9","page":1});
+    let grant = json!({"type":"c","name":"晴天","player":"歌手","album":"专辑"});
+    let metadata = json!({"itemMusic":{"id":"abc","name":"晴天","album":"专辑","player":"歌手","url":"https://m701.music.126.net/test.flac"}});
+    let html = format!(
+        "<script>self.__next_f.push({})</script>",
+        json!([1, format!("a:{metadata}\n")])
+    );
+    s.host.borrow_mut().fixture = Some(json!({
+        "https://www.24bit.net/api/player/searchOnlineMusicOne":{"_expectBody":query,"status":true,"result":[{"id":"abc","name":"晴天","album":"专辑","player":"歌手"}]},
+        "https://www.24bit.net/api/player/searchOnlineMusicTwo":{"_expectBody":query,"status":true,"result":[{"id":"abc","name":"晴天 (Live)","player":"歌手"}]},
+        "https://www.24bit.net/music/c/abc":{"_text":html},
+        "https://www.24bit.net/api/music/getOnlineDownload":{"responses":[{"_expectBody":grant,"status":true,"result":"limit"},{"_expectBody":grant,"status":false,"result":{"message":"拒绝下载"}},{"_expectBody":grant,"status":true,"result":true}]}
+    }));
+    let page = s
+        .call(Request::new("search", json!({"query":"晴天"})))
+        .unwrap();
+    assert_eq!(page["items"][0]["key"]["id"], "c:abc");
+    assert_eq!(page["items"][1]["key"]["id"], "b:abc");
+    assert!(page["items"][0].get("downloadable").is_none());
+    let args = json!({"id":"c:abc"});
+    assert_eq!(
+        s.call(Request::new("stream", args.clone())).unwrap()["url"],
+        "https://m701.music.126.net/test.flac"
+    );
+    assert!(
+        s.call(Request::new("download", args.clone()))
+            .unwrap_err()
+            .to_string()
+            .contains("额度")
+    );
+    assert!(
+        s.call(Request::new("download", args.clone()))
+            .unwrap_err()
+            .to_string()
+            .contains("拒绝")
+    );
+    let file = s.call(Request::new("download", args)).unwrap();
+    assert_eq!(file["url"], "https://m701.music.126.net/test.flac");
+    assert!(
+        file["attribution"]
+            .as_str()
+            .unwrap()
+            .contains("/music/c/abc")
+    );
+}

@@ -3,20 +3,60 @@ fn main() -> Result<()> {
     let args: Vec<_> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
         Some("plugin") => {
-            let bytes = music_plugin_host::bundle(std::path::Path::new("plugins/netease-js"))?;
-            let m = music_plugin_host::manifest(&bytes)?;
-            music_plugin_host::Runtime::new().validate(&bytes)?;
             std::fs::create_dir_all("dist")?;
-            std::fs::write("dist/netease.ypm.zip", &bytes)?;
-            println!(
-                "{} {}: dist/netease.ypm.zip ({} bytes)",
-                m.name,
-                m.version,
-                bytes.len()
-            );
+            use music_plugin_host::catalog::{Catalog, Entry, checksum};
+            let base = std::env::var("MUSIC_PLUGIN_RELEASE_BASE").unwrap_or_else(|_| {
+                format!(
+                    "https://github.com/zacharyzj/music-app/releases/download/plugins-v{}",
+                    env!("CARGO_PKG_VERSION")
+                )
+            });
+            let mut plugins = Vec::new();
+            for directory in [
+                "plugins/netease-js",
+                "plugins/incompetech-js",
+                "plugins/audius-js",
+                "plugins/bilibili-js",
+                "plugins/24bit-js",
+            ] {
+                let bytes = music_plugin_host::bundle(std::path::Path::new(directory))?;
+                let m = music_plugin_host::manifest(&bytes)?;
+                music_plugin_host::Runtime::new().validate(&bytes)?;
+                let path = format!("dist/{}.ypm.zip", m.id);
+                std::fs::write(&path, &bytes)?;
+                println!("{} {}: {path} ({} bytes)", m.name, m.version, bytes.len());
+                let raw: serde_json::Value = serde_json::from_slice(&std::fs::read(
+                    std::path::Path::new(directory).join("plugin.json"),
+                )?)?;
+                plugins.push(Entry {
+                    url: format!("{base}/{}.ypm.zip", m.id),
+                    sha256: checksum(&bytes),
+                    id: m.id,
+                    name: m.name,
+                    version: m.version,
+                    description: raw["description"].as_str().unwrap_or_default().into(),
+                    network: m.network,
+                    media: m.media,
+                });
+            }
+            std::fs::write(
+                "dist/plugins.json",
+                serde_json::to_vec_pretty(&Catalog { schema: 1, plugins })?,
+            )?;
         }
         Some("probe") => {
-            let bytes = std::fs::read("dist/netease.ypm.zip")?;
+            let source = args
+                .windows(2)
+                .find(|a| a[0] == "--source")
+                .map_or("netease", |a| a[1].as_str());
+            anyhow::ensure!(
+                !source.is_empty()
+                    && source
+                        .bytes()
+                        .all(|c| c.is_ascii_alphanumeric() || c == b'-'),
+                "Invalid source ID"
+            );
+            let bytes = std::fs::read(format!("dist/{source}.ypm.zip"))?;
             let root = std::env::temp_dir().join("music-api-probe");
             let rt = music_plugin_host::Runtime::new();
             let query = args.get(1).map(String::as_str).unwrap_or("晴天");
@@ -30,7 +70,7 @@ fn main() -> Result<()> {
                 p["items"].as_array().map_or(0, Vec::len),
                 p["more"]
             );
-            if args.get(2).is_some_and(|s| s == "--play") {
+            if args.iter().any(|s| s == "--play") {
                 let id = &p["items"][0]["key"]["id"];
                 let stream = rt.call(
                     &bytes,
@@ -45,6 +85,7 @@ fn main() -> Result<()> {
                     stream["url"]
                         .as_str()
                         .ok_or_else(|| anyhow::anyhow!("Missing stream URL"))?,
+                    stream["referrer"].as_str(),
                 )?;
             }
         }
@@ -107,14 +148,15 @@ fn main() -> Result<()> {
         Some("play") => playback(
             args.get(1)
                 .ok_or_else(|| anyhow::anyhow!("Missing file path"))?,
+            None,
         )?,
         _ => bail!(
-            "Usage: cargo xtask plugin | probe [query] [--play] | probe-account <app-data-dir> | play <file>"
+            "Usage: cargo xtask plugin | probe [query] [--source id] [--play] | probe-account <app-data-dir> | play <file>"
         ),
     };
     Ok(())
 }
-fn playback(url: &str) -> Result<()> {
+fn playback(url: &str, referrer: Option<&str>) -> Result<()> {
     use music_player::{Command, Player, PlayerEvent};
     use std::time::{Duration, Instant};
     let path = std::env::var_os("MUSIC_API_MPV")
@@ -122,7 +164,10 @@ fn playback(url: &str) -> Result<()> {
         .unwrap_or_else(|| "dist/native/mpv-2.dll".into());
     let player = Player::start(Some(&path));
     player.commands.send(Command::Volume(10.0))?;
-    player.commands.send(Command::Open(url.into()))?;
+    player.commands.send(Command::Open {
+        url: url.into(),
+        referrer: referrer.map(str::to_owned),
+    })?;
     let deadline = Instant::now() + Duration::from_secs(25);
     let mut paused = false;
     let mut success = false;

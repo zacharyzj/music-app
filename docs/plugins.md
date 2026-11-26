@@ -55,3 +55,27 @@ API 请求必须为清单允许的 HTTPS 域名；支持精确域名和 `*.examp
 ## 旧数据迁移
 
 继续使用同一系统凭据项及 AES-GCM 文件 `plugin-data/{id}.enc`。网易云原 `cookies/account/quality` 可直接读取，`device` 自动补入 `deviceId`。安装新版应直接覆盖导入，不能先卸载。旧 `.wasm` 不再由应用加载，协议保存在 `legacy/wasm-protocol.md`。
+
+## 联机搜索和下载
+
+插件在 `plugin.json` 的 `capabilities` 数组中声明 `download`，并通过 `permissions.media` 指定音频域名。插件导出 `download({ id })`，成功时返回 `{ url, size?, attribution? }`，失败时抛出可显示的错误。宿主只向此接口请求下载地址，校验 HTTPS 地址、重定向域名、文件长度和音频格式，再保存并索引文件。`attribution` 会随歌曲保存为 UTF-8 文本。
+
+`anonymous` 表示该源无需登录。`tracksOnly` 表示本地搜索只在歌曲类型回退到该源。插件可在曲目中返回 `license`，在歌曲行显示许可名称。`searchAliases` 可携带歌名或歌手的其他写法，下载入库后支持按这些写法搜索。
+
+插件清单可声明 `searchPageSize` 为正整数，默认 50。宿主按每个源自己的页长推进搜索偏移。哔哩哔哩使用 20。只读源可声明 `readOnly` 隐藏收藏操作，同时保留账号登录。
+
+`stream({ id })` 返回 `{ url, referrer? }`。可选的 `referrer` 为音乐源已声明的 HTTPS 来源页，路径支持字母、数字和 `/._-~`。播放器仅对本曲目设置 HTTP Referer。哔哩哔哩在 API 请求中使用本插件加密保存的会话，并用 BV 号对应的视频页作为播放来源页。
+
+曲目可以返回可选的布尔字段 `downloadable`。`false` 会在歌曲行显示「未开放下载」，`true` 允许点击下载。省略字段会沿用原来的行为，由插件在点击时判断。插件仍应在导出 `download({ id })` 时核对最新权限，播放权限另由曲目的 `unavailable` 控制。免登录筛选同时要求插件声明 `anonymous`、`download` 和媒体域名，并由曲目明确返回 `downloadable: true`。
+
+不同插件的搜索在独立线程返回，同一插件的调用串行复用一个 QuickJS 会话。宿主按来源分别翻页。下载任务轮到执行或重试时才调用 `download` 获取最新地址。
+
+`host.mediaAllowed(url)` 按当前插件的媒体域名声明检查 HTTPS 地址，插件可以用它从源提供的镜像中选择可用地址。
+
+## 在线目录与发布
+
+在「设置与插件 → 在线插件」可以读取 HTTPS JSON 索引，或直接输入单个插件 ZIP 地址。官方目录使用 [GitHub Release 的稳定下载地址](https://github.com/zacharyzj/music-app/releases/latest/download/plugins.json)。从索引安装时，程序校验 ZIP 的 SHA-256，以及包内清单的 ID、版本、API 和媒体域名。导入成功后，与本地 ZIP 使用同一套启停和更新流程。
+
+`cargo xtask plugin` 在 `dist/` 生成五个独立插件包和 `plugins.json`。索引根对象含 `schema: 1` 和 `plugins` 数组。每条记录含 `id`、`name`、`version`、`description`、`url`、`sha256`、`network` 和 `media`。发布包使用带版本的绝对地址。自托管索引也可使用相对于索引的地址。
+
+维护者推送 `plugins-v*` 标签会触发 `.github/workflows/publish-plugins.yml`，自动构建包并在同名 GitHub Release 上传索引与插件。播放器使用公开 HTTPS 下载地址，无需登录 GitHub。

@@ -8,6 +8,7 @@ globalThis.console = Object.freeze({log(){},info(){},warn(){},error(){},debug(){
 globalThis.host = Object.freeze({
   storage:Object.freeze({get:key=>callHost('get',{key}),set:(key,value)=>callHost('set',{key,value:value??null}),remove:key=>callHost('remove',{key})}),
   crypto:Object.freeze({md5:text=>callHost('md5',{text:String(text)}),aesEcbEncrypt:(key,text)=>callHost('aes',{key,text})}),
+  mediaAllowed:url=>callHost('mediaAllowed',{url:String(url)}),
   setting:key=>callHost('setting',{key}), language:()=> 'zh-CN', t:text=>String(text),
   signInPrompt:prompt=>callHost('prompt',{prompt:prompt??null}),
   openURL:()=>{throw new Error('此宿主尚未开放外部链接操作')},
@@ -39,7 +40,7 @@ globalThis.__tick=()=>{const now=Date.now();for(const [id,t] of [...timers])if(t
 globalThis.__results=Object.create(null);
 
 const coverUrl=x=>typeof x==='string'&&/^https:\/\//i.test(x)?x:'';
-const item=(x,kind,source)=>({key:{source,id:String(x.id??'')},kind,title:x.name||'',subtitle:(x.artists||[]).map(a=>a.name).join(' / ')||x.owner||'',cover:coverUrl(x.imageUrl||x.album?.imageUrl),duration_ms:x.duration||0,unavailable:!!x.unavailable,album:x.album?.name||'',artist:(x.artists||[]).map(a=>a.name).join(' / ')});
+const item=(x,kind,source)=>({key:{source,id:String(x.id??'')},kind,title:x.name||'',search_aliases:Array.isArray(x.searchAliases)?x.searchAliases.filter(s=>typeof s==='string'):undefined,license:x.license||'',subtitle:(x.artists||[]).map(a=>a.name).join(' / ')||x.owner||'',cover:coverUrl(x.imageUrl||x.album?.imageUrl),duration_ms:x.duration||0,unavailable:!!x.unavailable,downloadable:typeof x.downloadable==='boolean'?x.downloadable:undefined,album:x.album?.name||'',artist:(x.artists||[]).map(a=>a.name).join(' / ')});
 const plural={track:'tracks',album:'albums',artist:'artists',playlist:'playlists'};
 globalThis.__dispatch=async(op,args,source)=>{
   const p=globalThis.__plugin;
@@ -48,7 +49,7 @@ globalThis.__dispatch=async(op,args,source)=>{
   if(op==='browse'&&!a.page&&a.id)a.page=a.id;
   if(typeof p[op]!=='function')throw Object.assign(new Error('插件不支持 '+op),{code:'unsupported'});
   const v=await p[op](a);
-  if(['account','signIn','signOut','stream','lyrics','suggest','like','saveAlbum','isLiked','menuAction','trackMenu'].includes(op))return v??null;
+  if(['account','signIn','signOut','stream','download','lyrics','suggest','like','saveAlbum','isLiked','menuAction','trackMenu'].includes(op))return v??null;
   let items=[],links=[],title=v?.title||({search:'搜索结果',liked:'喜欢的歌曲',playlists:'我的歌单',savedAlbums:'收藏专辑',recent:'最近播放'}[op]||'音乐');
   const add=container=>{for(const [kind,key]of Object.entries(plural))for(const x of(container?.[key]||[]))items.push(item(x,kind,source));for(const x of(container?.links||[]))links.push({title:x.title||'',op:'browse',args:{page:x.page||''}})};
   let more=!!v?.more,offset=args.offset||0;

@@ -32,7 +32,10 @@ struct EndFile {
 }
 #[derive(Debug)]
 pub enum Command {
-    Open(String),
+    Open {
+        url: String,
+        referrer: Option<String>,
+    },
     Pause(bool),
     Seek(f64),
     Volume(f64),
@@ -131,9 +134,16 @@ unsafe fn run(path: Option<&Path>, rx: Receiver<Command>, tx: Sender<PlayerEvent
                 Ok(Command::Quit) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
                 Ok(c) => {
                     let args: Vec<String> = match c {
-                        Command::Open(url) => {
+                        Command::Open { url, referrer } => {
                             active = false;
-                            vec!["loadfile".into(), url, "replace".into()]
+                            let mut args = vec!["loadfile".into(), url, "replace".into()];
+                            if let Some(page) = referrer {
+                                args.extend([
+                                    "-1".into(),
+                                    format!("referrer=%{}%{}", page.len(), page),
+                                ]);
+                            }
+                            args
                         }
                         Command::Pause(p) => vec![
                             "set".into(),

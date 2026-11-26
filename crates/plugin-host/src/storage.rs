@@ -16,6 +16,8 @@ pub struct Storage {
 }
 impl Storage {
     pub fn open(root: &Path, id: &str) -> Result<Self> {
+        static KEY_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let guard = KEY_LOCK.lock().map_err(|_| anyhow!("凭据存储不可用"))?;
         let entry = keyring::Entry::new("music-api", "plugin-storage-key")?;
         let key = match entry.get_password() {
             Ok(s) => hex::decode(s)?,
@@ -27,6 +29,7 @@ impl Storage {
             }
             Err(e) => return Err(e.into()),
         };
+        drop(guard);
         Self::with_key(
             root.join(format!("{id}.enc")),
             key.try_into().map_err(|_| anyhow!("凭据密钥无效"))?,

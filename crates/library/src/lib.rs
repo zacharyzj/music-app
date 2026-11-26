@@ -4,13 +4,33 @@ use lofty::{
     tag::Accessor,
 };
 use music_core::*;
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::{Value, json};
 use std::{
     collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     sync::atomic::{AtomicBool, Ordering},
 };
+pub fn downloaded_audio(path: &Path) -> Result<(&'static str, u64)> {
+    use lofty::{file::FileType, probe::Probe};
+    let tagged = Probe::open(path)?.guess_file_type()?.read()?;
+    let extension = match tagged.file_type() {
+        FileType::Mpeg => "mp3",
+        FileType::Mp4 => "m4a",
+        FileType::Flac => "flac",
+        FileType::Opus => "opus",
+        FileType::Vorbis => "ogg",
+        FileType::Wav => "wav",
+        FileType::Aac => "aac",
+        FileType::Aiff => "aiff",
+        FileType::Ape => "ape",
+        _ => anyhow::bail!("不支持的下载音频格式"),
+    };
+    let duration = tagged.properties().duration().as_millis() as u64;
+    anyhow::ensure!(duration > 0, "下载文件没有可播放的音频");
+    Ok((extension, duration))
+}
+
 pub struct Library {
     pub db: Connection,
     root: PathBuf,
@@ -55,7 +75,14 @@ impl Library {
     }
     pub fn scan(&mut self, cancel: &AtomicBool) -> Result<Vec<String>> {
         let mut warnings = Vec::new();
-        for folder in self.folders() {
+        let mut folders = self.folders();
+        if let Ok(downloads) = self.root.join("downloads").canonicalize() {
+            let downloads = downloads.to_string_lossy().into_owned();
+            if !folders.contains(&downloads) {
+                folders.push(downloads);
+            }
+        }
+        for folder in folders {
             let mut found = HashSet::new();
             let mut complete = true;
             let mut updates = Vec::new();
@@ -175,6 +202,46 @@ impl Library {
         }
         Ok(warnings)
     }
+    pub fn downloaded_path(&self, key: &ResourceKey) -> Option<PathBuf> {
+        let id = self.get(&format!("download/{}/{}", key.source, key.id));
+        self.path(id.as_str()?).ok().filter(|p| p.is_file())
+    }
+
+    pub fn index_download(&mut self, path: &Path, mut item: Item) -> Result<()> {
+        let directory = self.root.join("downloads").canonicalize()?;
+        let path = path.canonicalize()?;
+        anyhow::ensure!(
+            path.parent() == Some(&directory),
+            "下载文件位于音乐目录之外"
+        );
+        let meta = path.metadata()?;
+        let stamp = format!("{}:{:?}", meta.len(), meta.modified());
+        let path = path.to_string_lossy();
+        let tx = self.db.transaction()?;
+        let local_id: Option<String> = tx
+            .query_row(
+                "SELECT id FROM tracks WHERE path=?1",
+                [path.as_ref()],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let remote = format!("download/{}/{}", item.key.source, item.key.id);
+        item.key = ResourceKey {
+            source: "local".into(),
+            id: local_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+        };
+        item.unavailable = false;
+        item.cover.clear();
+        tx.execute("INSERT INTO tracks VALUES(?1,?2,?3,?4,?5) ON CONFLICT(path) DO UPDATE SET stamp=excluded.stamp,data=excluded.data",
+            params![item.key.id, path, directory.to_string_lossy(), stamp, serde_json::to_string(&item)?])?;
+        tx.execute(
+            "INSERT OR REPLACE INTO kv(key,value) VALUES(?1,?2)",
+            params![remote, json!(item.key.id).to_string()],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
     pub fn tracks(&self) -> Result<Vec<Item>> {
         let strings: Vec<String> = self
             .db
@@ -328,6 +395,9 @@ impl Library {
                     format!("{} {} {}", v.title, v.artist, v.album)
                         .to_lowercase()
                         .contains(&query)
+                        || v.search_aliases
+                            .iter()
+                            .any(|alias| alias.to_lowercase().contains(&query))
                 });
                 let kind = a["kind"].as_str().unwrap_or("track");
                 if ["album", "artist"].contains(&kind) {

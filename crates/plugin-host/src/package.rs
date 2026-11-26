@@ -7,7 +7,7 @@ use std::{
     path::Path,
 };
 
-const MAX_PACKAGE: usize = 32 * 1024 * 1024;
+pub(crate) const MAX_PACKAGE: usize = 32 * 1024 * 1024;
 #[derive(Clone)]
 pub struct Package {
     pub manifest: Manifest,
@@ -137,7 +137,17 @@ impl Package {
             name: raw["name"].as_str().unwrap_or(id).into(),
             version: raw["version"].as_str().unwrap_or("0").into(),
             abi: 2,
-            capabilities: vec!["settings".into()],
+            capabilities: {
+                let mut caps = vec!["settings".into()];
+                caps.extend(strings(&raw["capabilities"]).into_iter().filter(|c| {
+                    matches!(
+                        c.as_str(),
+                        "download" | "anonymous" | "tracksOnly" | "readOnly"
+                    )
+                }));
+                caps
+            },
+            search_page_size: serde_json::from_value(raw["searchPageSize"].clone())?,
             network,
             media,
             navigation,
@@ -192,12 +202,21 @@ pub fn bundle(dir: &Path) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 pub fn install(file: &Path, dir: &Path) -> Result<Manifest> {
+    install_with(file, dir, |_| {})
+}
+
+pub fn install_with(
+    file: &Path,
+    dir: &Path,
+    before_replace: impl FnOnce(&Manifest),
+) -> Result<Manifest> {
     let bytes = if file.is_dir() {
         bundle(file)?
     } else {
         std::fs::read(file)?
     };
     let m = manifest(&bytes)?;
+    before_replace(&m);
     std::fs::create_dir_all(dir)?;
     let target = dir.join(format!("{}.ypm.zip", m.id));
     if target.exists() {

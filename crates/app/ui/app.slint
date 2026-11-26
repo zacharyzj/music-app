@@ -1,5 +1,8 @@
 import { Palette, LineEdit, ComboBox, Slider, ScrollView, CheckBox } from "std-widgets.slint";
-export struct Row {title:string,subtitle:string,album:string,duration:string,kind:string,cover:image,disabled:bool}
+export struct Row {resource:string,title:string,subtitle:string,album:string,duration:string,kind:string,cover:image,disabled:bool,download-blocked:bool,download-label:string,show-download:bool,account-actions:bool}
+export struct PluginRow { name: string, permissions: string, enabled: bool }
+export struct CatalogRow { title: string, description: string, permissions: string, action-label: string, can-install: bool }
+export struct DownloadRow { title:string, artist:string, status:string, fraction:float, active:bool, failed:bool }
 export struct Nav {title:string}
 export global Theme {
     in-out property <bool> dark:true;
@@ -102,6 +105,9 @@ export component AppWindow inherits Window {
     out property <bool> compact:root.width<980px;
     private property <length> sidebar-width:root.compact ? 176px : 206px;
     private property <length> player-height:root.compact ? 96px : 110px;
+    private property <length> actions-width: (root.compact ? 64px : 86px)
+        + (root.can-download ? (root.compact ? 80px : 88px) : 0px)
+        + (root.page-account-actions ? (root.compact ? 64px : 100px) : 0px);
     private property <int> card-columns:root.compact ? 2 : 4;
     in-out property <bool> dark:true;
     callback native-theme-changed();
@@ -117,11 +123,33 @@ export component AppWindow inherits Window {
     in property <[Nav]> page-tabs;
     in property <int> page-tab-index:-1;
     in property <[Row]> rows;
+    in property <[string]> online-sources;
+    in-out property <int> online-index;
+    in property <bool> search-page;
+    in property <bool> can-download;
+    in property <bool> anonymous-source;
+    in property <bool> page-account-actions:true;
+    in property <[DownloadRow]> downloads;
+    in property <int> download-pending;
+    in property <bool> can-filter;
+    in-out property <bool> guest-only;
+    in-out property <bool> show-downloads;
+    callback download-action(int,string);
+    callback filter-changed();
+    in property <string> download-notice;
+    callback online-source(int);
     in property <bool> cards;
     in property <bool> home-page;
     in property <bool> local-playlist;
     in property <[Row]> queue;
-    in property <[string]> plugin-names;
+    in property <[PluginRow]> plugin-rows;
+    in property <bool> has-quality-setting;
+    in-out property <bool> show-catalog;
+    in-out property <string> catalog-url;
+    in property <string> catalog-status;
+    in property <bool> catalog-busy;
+    in property <[CatalogRow]> catalog-rows;
+    callback catalog-action(int);
     in property <[string]> playlist-names;
     in-out property <int> playlist-index;
     in property <int> quality-index;
@@ -140,6 +168,7 @@ export component AppWindow inherits Window {
     in property <bool> busy;
     in property <bool> has-error;
     in property <bool> more;
+    in property <string> next-label:"加载更多";
     in property <float> position;
     in property <float> duration;
     in property <string> time-label:"00:00 / 00:00";
@@ -191,6 +220,11 @@ export component AppWindow inherits Window {
                             }
                         }}
                         Rectangle {height:1px;background:Theme.line;}
+                        Rectangle {height:36px;border-radius:10px;background:download-touch.has-hover||root.show-downloads ? Theme.elevated : transparent;
+                            HorizontalLayout {padding-left:12px;spacing:11px;Glyph {source:@image-url("icons/cloud.svg");}
+                                Text {text:root.download-pending>0 ? "下载队列 · "+root.download-pending : "下载队列";color:Theme.ink;vertical-alignment:center;}}
+                            download-touch:=TouchArea {mouse-cursor:pointer;clicked=>{root.show-downloads=!root.show-downloads;root.show-queue=false;}}
+                        }
                         Rectangle {height:root.compact ? 36px : 42px;border-radius:10px;background:settings-touch.has-hover||root.show-settings ? Theme.elevated : transparent;
                             HorizontalLayout {padding-left:12px;spacing:11px;Glyph {source:@image-url("icons/settings.svg");}Text {text:"设置与插件";color:Theme.ink;vertical-alignment:center;}}
                             settings-touch:=TouchArea {mouse-cursor:pointer;clicked=>{root.show-settings=!root.show-settings;}}
@@ -198,9 +232,9 @@ export component AppWindow inherits Window {
                         Rectangle {height:root.compact ? 40px : 45px;
                             HorizontalLayout {spacing:10px;
                                 Rectangle {width:35px;height:35px;border-radius:18px;background:@linear-gradient(135deg,#c0a3df,#626d98);Image {source:@image-url("icons/user.svg");colorize:#ffffff;width:18px;height:18px;x:8px;y:7px;}}
-                                VerticalLayout {alignment:center;spacing:2px;Text {text:root.source-index==0?"本地聆听":root.account-name;color:Theme.ink;font-size:12px;overflow:elide;min-width:0px;}Text {text:root.source-index==0?"音乐，从这里开始":"点击管理登录";color:Theme.muted;font-size:10px;}}
+                                VerticalLayout {alignment:center;spacing:2px;Text {text:root.source-index==0?"本地聆听":root.anonymous-source?"开放曲库":root.account-name;color:Theme.ink;font-size:12px;overflow:elide;min-width:0px;}Text {text:root.source-index==0?"音乐，从这里开始":root.anonymous-source?"免登录":"点击管理登录";color:Theme.muted;font-size:10px;}}
                             }
-                            TouchArea {enabled:root.source-index>0;mouse-cursor:pointer;clicked=>{root.action("login");}}
+                            TouchArea {enabled:root.source-index>0&&!root.anonymous-source;mouse-cursor:pointer;clicked=>{root.action("login");}}
                         }
                     }
                 }
@@ -225,12 +259,28 @@ export component AppWindow inherits Window {
                             Text {text:"音乐与外观";color:Theme.ink;font-size:17px;font-weight:600;}
                             HorizontalLayout {spacing:10px;ActionButton {text:"添加音乐目录";primary:true;clicked=>{root.action("add-folder");}}ActionButton {text:"重新扫描";clicked=>{root.action("scan");}}ActionButton {text:"取消扫描";clicked=>{root.action("cancel-scan");}}Rectangle{horizontal-stretch:1;}if !root.compact: CheckBox {text:"深色主题";checked<=>root.dark;}}
                             if root.compact: HorizontalLayout {Rectangle {horizontal-stretch:1;}CheckBox {text:"深色主题";checked<=>root.dark;}}
-                            HorizontalLayout {spacing:12px;Text {text:"播放音质";color:Theme.muted;vertical-alignment:center;}ComboBox {width:150px;enabled:root.source-index>0;model:["跟随播放器","标准","高音质","无损","Hi-Res"];current-index:root.quality-index;selected(v)=>{root.quality(["follow","standard","high","lossless","hires"][self.current-index]);}}Rectangle{horizontal-stretch:1;}ActionButton {text:"退出当前账号";enabled:root.source-index>0;clicked=>{root.action("logout");}}}
+                            HorizontalLayout {spacing:12px;Text {text:"播放音质";color:Theme.muted;vertical-alignment:center;}ComboBox {width:150px;enabled:root.has-quality-setting;model:["跟随播放器","标准","高音质","无损","Hi-Res"];current-index:root.quality-index;selected(v)=>{root.quality(["follow","standard","high","lossless","hires"][self.current-index]);}}Rectangle{horizontal-stretch:1;}ActionButton {text:"退出当前账号";enabled:root.source-index>0&&!root.anonymous-source;clicked=>{root.action("logout");}}}
                         }}
-                        Rectangle {height:125px + root.plugin-names.length*110px;border-radius:16px;background:Theme.panel;VerticalLayout {padding:20px;spacing:14px;
-                            HorizontalLayout {Text {text:"音乐源插件";color:Theme.ink;font-size:17px;font-weight:600;horizontal-stretch:1;}ActionButton {text:"安装 JS 插件";primary:true;clicked=>{root.action("import");}}}
+                        Rectangle {height:125px + root.plugin-rows.length*110px;border-radius:16px;background:Theme.panel;VerticalLayout {padding:20px;spacing:14px;
+                            HorizontalLayout {Text {text:"音乐源插件";color:Theme.ink;font-size:17px;font-weight:600;horizontal-stretch:1;}ActionButton {text:"导入本地 ZIP";clicked=>{root.action("import");}}ActionButton {text:"在线插件";primary:true;clicked=>{root.show-catalog=true;if root.catalog-rows.length==0 {root.catalog-action(-1);}}}}
                             Text {text:"安装兼容的音乐源，即可在左侧切换。账号数据在本机加密保存。";color:Theme.muted;font-size:12px;wrap:word-wrap;}
-                            for name[i] in root.plugin-names: Rectangle {height:95px;border-radius:10px;background:Theme.elevated;HorizontalLayout {padding:13px;spacing:12px;Text {text:name;color:Theme.ink;wrap:word-wrap;font-size:11px;horizontal-stretch:1;}ActionButton {text:"启用 / 停用";clicked=>{root.plugin-action(i,"toggle");}}ActionButton {text:"卸载";clicked=>{root.plugin-action(i,"remove");}}}}
+                            for plugin[i] in root.plugin-rows: Rectangle {
+                                height:95px;border-radius:10px;
+                                background:plugin.enabled ? Theme.accent.mix(Theme.elevated, 8%) : Theme.elevated;
+                                border-width:1px;border-color:plugin.enabled ? Theme.accent.transparentize(55%) : Theme.line;
+                                HorizontalLayout {padding:13px;spacing:10px;
+                                    VerticalLayout {alignment:center;spacing:3px;horizontal-stretch:1;min-width:0px;
+                                        Text {text:plugin.name;color:plugin.enabled ? Theme.accent : Theme.ink;font-size:14px;font-weight:600;overflow:elide;min-width:0px;}
+                                        Text {text:plugin.permissions;color:Theme.ink.mix(Theme.muted, 22%);font-size:11px;wrap:word-wrap;overflow:elide;min-width:0px;}
+                                    }
+                                    VerticalLayout {alignment:center;horizontal-stretch:0;
+                                        HorizontalLayout {spacing:10px;
+                                            ActionButton {text:plugin.enabled ? "已启用" : "启用";primary:plugin.enabled;clicked=>{root.plugin-action(i,"toggle");}}
+                                            ActionButton {text:"卸载";clicked=>{root.plugin-action(i,"remove");}}
+                                        }
+                                    }
+                                }
+                            }
                         }}
                         Rectangle {height:220px;border-radius:16px;background:Theme.panel;VerticalLayout {padding:20px;spacing:14px;
                             Text {text:"本地歌单";color:Theme.ink;font-size:17px;font-weight:600;}
@@ -241,6 +291,13 @@ export component AppWindow inherits Window {
                         }}
                     }}
                     if !root.show-settings&&!root.show-lyrics: VerticalLayout {spacing:root.compact ? 10px : 16px;min-height:0px;
+                        if root.online-sources.length>0 && (root.online-sources.length>2 || root.can-filter): HorizontalLayout {
+                            height:34px;spacing:10px;
+                            if root.online-sources.length>2: ComboBox {width:156px;model:root.online-sources;current-index<=>root.online-index;selected(v)=>{root.online-source(self.current-index);}}
+                            if root.can-filter: ActionButton {text:"仅看免登录可下载";primary:root.guest-only;clicked=>{root.guest-only=!root.guest-only;root.filter-changed();}}
+                            Rectangle {horizontal-stretch:1;}
+                        }
+                        if root.download-notice!="": Text {text:root.download-notice;color:Theme.ink;font-size:12px;wrap:word-wrap;}
                         if root.page-tabs.length>0: HorizontalLayout {
                             height:38px;spacing:26px;
                             for tab[i] in root.page-tabs: PageTab {
@@ -260,9 +317,9 @@ export component AppWindow inherits Window {
                         if root.rows.length==0&&!root.busy: Rectangle {border-radius:20px;background:Theme.panel;
                             VerticalLayout {x:0px;y:0px;width:parent.width;height:parent.height;alignment:center;padding:root.compact ? 16px : 50px;spacing:root.compact ? 12px : 18px;
                                 HorizontalLayout {alignment:center;height:root.compact ? 48px : 64px;Image {source:@image-url("icons/disc.svg");colorize:Theme.accent;width:root.compact ? 48px : 64px;height:self.width;}}
-                                Text {text:root.source-index==0?"把喜欢的音乐，留在身边。":"此刻，这里还很安静。";color:Theme.ink;font-size:root.compact ? 18px : 23px;font-weight:600;wrap:word-wrap;min-width:0px;horizontal-alignment:center;}
-                                Text {text:root.source-index==0?"添加音乐文件夹，让每一张唱片都有自己的位置。":"试试搜索喜欢的音乐，或切换到其他页面。";color:Theme.muted;font-size:12px;wrap:word-wrap;min-width:0px;horizontal-alignment:center;}
-                                HorizontalLayout {alignment:center;if root.source-index==0: ActionButton {text:"添加音乐目录";primary:true;clicked=>{root.action("add-folder");}}}
+                                Text {text:root.can-filter&&root.guest-only?"当前结果中没有免登录可下载的歌曲":root.search-page?"没有找到匹配结果":root.source-index==0?"把喜欢的音乐，留在身边。":"此刻，这里还很安静。";color:Theme.ink;font-size:root.compact ? 18px : 23px;font-weight:600;wrap:word-wrap;min-width:0px;horizontal-alignment:center;}
+                                Text {text:root.can-filter&&root.guest-only?"可关闭筛选查看其他录音。":root.search-page?"试试其他曲名或歌手名。":root.source-index==0?"添加音乐文件夹，让每一张唱片都有自己的位置。":"试试搜索喜欢的音乐，或切换到其他页面。";color:Theme.muted;font-size:12px;wrap:word-wrap;min-width:0px;horizontal-alignment:center;}
+                                HorizontalLayout {alignment:center;if root.more: ActionButton {text:root.next-label;clicked=>{root.action("more");}}if root.source-index==0&&!root.search-page: ActionButton {text:"添加音乐目录";primary:true;clicked=>{root.action("add-folder");}}}
                             }
                         }
                         if root.cards&&root.rows.length>0: cards-view:=ScrollView {content-width:self.width;VerticalLayout {spacing:22px;
@@ -282,10 +339,10 @@ export component AppWindow inherits Window {
                                     card-touch:=TouchArea {mouse-cursor:pointer;clicked=>{if (group*root.card-columns+col)<root.rows.length{root.row-action(group*root.card-columns+col,"open");}}}
                                 }
                             }
-                            if root.more: ActionButton {text:"加载更多";enabled:!root.busy;clicked=>{root.action("more");}}
+                            if root.more: ActionButton {text:root.next-label;enabled:!root.busy;clicked=>{root.action("more");}}
                         }}
                         if !root.cards&&root.rows.length>0: VerticalLayout {spacing:6px;
-                            HorizontalLayout {height:24px;padding-left:12px;padding-right:12px;spacing:root.compact ? 8px : 14px;Text {text:"#";width:25px;color:Theme.muted;font-size:11px;}Text {text:"歌曲 / 歌手";min-width:0px;horizontal-stretch:1;color:Theme.muted;font-size:11px;}if !root.compact: Text {text:"专辑";width:130px;color:Theme.muted;font-size:11px;}Text {text:"时长";width:48px;color:Theme.muted;font-size:11px;}Rectangle{width:root.compact ? 168px : 186px;}}
+                            HorizontalLayout {height:24px;padding-left:12px;padding-right:12px;spacing:root.compact ? 8px : 14px;Text {text:"#";width:25px;color:Theme.muted;font-size:11px;}Text {text:"歌曲 / 歌手";min-width:0px;horizontal-stretch:1;color:Theme.muted;font-size:11px;}if !root.compact: Text {text:"专辑";width:130px;color:Theme.muted;font-size:11px;}Text {text:"时长";width:48px;color:Theme.muted;font-size:11px;}Rectangle{width:root.actions-width;}}
                             ScrollView {VerticalLayout {spacing:4px;
                                 for row[i] in root.rows: Rectangle {height:66px;border-radius:10px;background:row-touch.has-hover ? Theme.elevated : i/2==floor(i/2) ? Theme.panel.with-alpha(0.45) : transparent;
                                     row-touch:=TouchArea {clicked=>{root.row-action(i,"open");}}
@@ -295,13 +352,16 @@ export component AppWindow inherits Window {
                                         VerticalLayout {horizontal-stretch:1;alignment:center;spacing:5px;Text {text:row.title;color:row.disabled?Theme.muted:Theme.ink;font-size:14px;font-weight:500;overflow:elide;min-width:0px;}Text {text:row.subtitle;color:Theme.muted;font-size:11px;overflow:elide;min-width:0px;}}
                                         if !root.compact: Text {text:row.album;width:130px;color:Theme.muted;font-size:11px;overflow:elide;vertical-alignment:center;}
                                         Text {text:row.duration;width:48px;color:Theme.muted;font-size:11px;vertical-alignment:center;}
-                                        IconButton {icon:@image-url("icons/play.svg");enabled:!row.disabled;clicked=>{root.row-action(i,"open");}}
-                                        IconButton {icon:@image-url("icons/plus.svg");clicked=>{root.row-action(i,"add");}}
-                                        IconButton {icon:@image-url("icons/heart.svg");clicked=>{root.row-action(i,"like");}}
-                                        IconButton {icon:@image-url("icons/close.svg");clicked=>{root.row-action(i,root.local-playlist?"remove":"unlike");}}
+                                        HorizontalLayout {width:root.actions-width;spacing:root.compact ? 4px : 14px;alignment:end;
+                                            IconButton {width:root.compact ? 28px : 36px;icon:@image-url("icons/play.svg");enabled:!row.disabled;clicked=>{root.row-action(i,"open");}}
+                                            IconButton {width:root.compact ? 28px : 36px;icon:@image-url("icons/plus.svg");enabled:!row.disabled;clicked=>{root.row-action(i,"add");}}
+                                            if row.show-download: ActionButton {width:74px;text:row.download-label;enabled:!row.download-blocked;clicked=>{root.row-action(i,"download");}}
+                                            if row.account-actions: IconButton {width:root.compact ? 28px : 36px;icon:@image-url("icons/heart.svg");clicked=>{root.row-action(i,"like");}}
+                                            if row.account-actions: IconButton {width:root.compact ? 28px : 36px;icon:@image-url("icons/close.svg");clicked=>{root.row-action(i,root.local-playlist?"remove":"unlike");}}
+                                        }
                                     }
                                 }
-                                if root.more: ActionButton {text:"加载更多";enabled:!root.busy;clicked=>{root.action("more");}}
+                                if root.more: ActionButton {text:root.next-label;enabled:!root.busy;clicked=>{root.action("more");}}
                             }}
                         }
                     }
@@ -328,7 +388,7 @@ export component AppWindow inherits Window {
                     }
                     VerticalLayout {width:root.compact ? 148px : 220px;alignment:center;HorizontalLayout {height:36px;spacing:8px;
                         IconButton {icon:@image-url("icons/lyrics.svg");active:root.show-lyrics;clicked=>{root.show-lyrics=!root.show-lyrics;root.show-settings=false;}}
-                        IconButton {icon:@image-url("icons/queue.svg");active:root.show-queue;clicked=>{root.show-queue=!root.show-queue;}}
+                        IconButton {icon:@image-url("icons/queue.svg");active:root.show-queue;clicked=>{root.show-queue=!root.show-queue;root.show-downloads=false;}}
                         if !root.compact: Glyph {source:@image-url("icons/volume.svg");}
                         Slider {width:root.compact ? 60px : 85px;minimum:0;maximum:100;value:70;changed(v)=>{root.volume(v);}}
                     }}
@@ -342,6 +402,61 @@ export component AppWindow inherits Window {
                         ScrollView {VerticalLayout {spacing:10px;for row[i] in root.queue: Rectangle {height:54px;HorizontalLayout {spacing:8px;Cover {source:row.cover;width:40px;height:40px;border-radius:7px;}Text {text:row.title;color:Theme.ink;font-size:12px;overflow:elide;min-width:0px;horizontal-stretch:1;vertical-alignment:center;}IconButton {icon:@image-url("icons/play.svg");clicked=>{root.queue-action(i,"play");}}IconButton {width:26px;icon:@image-url("icons/close.svg");clicked=>{root.queue-action(i,"remove");}}}}}}
                     }
                 }
+    if root.show-downloads: Rectangle {
+        width:min(380px, parent.width);height:parent.height - root.player-height;
+        x:parent.width - self.width;y:0px;background:Theme.panel;border-width:1px;border-color:Theme.line;
+        TouchArea {}
+        VerticalLayout {padding:18px;spacing:12px;
+            HorizontalLayout {height:36px;
+                Text {text:"下载队列";font-size:19px;font-weight:600;color:Theme.ink;horizontal-stretch:1;vertical-alignment:center;}
+                IconButton {icon:@image-url("icons/close.svg");clicked=>{root.show-downloads=false;}}
+            }
+            if root.downloads.length==0: Text {text:"暂无下载任务";color:Theme.muted;horizontal-alignment:center;vertical-alignment:center;vertical-stretch:1;}
+            if root.downloads.length>0: ScrollView {VerticalLayout {alignment:start;spacing:8px;
+                for task[i] in root.downloads: Rectangle {height:task.failed ? 100px : 78px;border-radius:10px;background:Theme.elevated;
+                    VerticalLayout {padding:10px;spacing:4px;
+                        HorizontalLayout {spacing:6px;
+                            VerticalLayout {horizontal-stretch:1;
+                                Text {text:task.title;font-size:14px;font-weight:600;color:Theme.ink;min-width:0px;overflow:elide;}
+                                Text {text:task.artist;font-size:11px;color:Theme.muted;min-width:0px;overflow:elide;}
+                            }
+                            if task.failed: ActionButton {text:"重试";clicked=>{root.download-action(i,"retry");}}
+                            if !task.active: IconButton {width:26px;icon:@image-url("icons/close.svg");clicked=>{root.download-action(i,"remove");}}
+                        }
+                        Text {text:task.status;font-size:11px;color:task.failed ? #d98796 : Theme.muted;wrap:word-wrap;overflow:elide;min-width:0px;}
+                        if task.active: Rectangle {height:3px;border-radius:2px;background:Theme.line;
+                            Rectangle {height:parent.height;width:parent.width*task.fraction;border-radius:2px;background:Theme.accent;}
+                        }
+                    }
+                }
+            }}
+        }
+    }
+    if root.show-catalog: Rectangle {
+        background:#88000000;TouchArea {}
+        Rectangle {width:min(root.width - 48px, 650px);height:min(root.height - 48px, 610px);
+            x:(parent.width - self.width)/2;y:(parent.height - self.height)/2;background:Theme.panel;border-radius:18px;
+            VerticalLayout {padding:20px;spacing:12px;
+                HorizontalLayout {Text {text:"在线插件";color:Theme.ink;font-size:20px;font-weight:600;horizontal-stretch:1;}IconButton {icon:@image-url("icons/close.svg");clicked=>{root.show-catalog=false;}}}
+                Text {text:"插件索引或插件 ZIP 的 HTTPS 地址";color:Theme.muted;font-size:12px;}
+                HorizontalLayout {spacing:8px;LineEdit {text<=>root.catalog-url;enabled:!root.catalog-busy;horizontal-stretch:1;accepted=>{root.catalog-action(-1);}}ActionButton {text:"读取 / 导入";enabled:!root.catalog-busy;clicked=>{root.catalog-action(-1);}}}
+                Text {text:root.catalog-status;color:Theme.muted;wrap:word-wrap;font-size:12px;}
+                ScrollView {VerticalLayout {spacing:8px;
+                    for entry[i] in root.catalog-rows: Rectangle {height:98px;background:Theme.elevated;border-radius:10px;
+                        HorizontalLayout {padding:12px;spacing:10px;
+                            VerticalLayout {horizontal-stretch:1;min-width:0px;alignment:center;spacing:3px;
+                                Text {text:entry.title;color:Theme.ink;font-weight:600;overflow:elide;min-width:0px;}
+                                Text {text:entry.description;color:Theme.ink;font-size:12px;overflow:elide;min-width:0px;}
+                                Text {text:entry.permissions;color:Theme.muted;font-size:10px;wrap:word-wrap;overflow:elide;min-width:0px;}
+                            }
+                            VerticalLayout {alignment:center;horizontal-stretch:0;ActionButton {text:entry.action-label;primary:entry.can-install;enabled:entry.can-install&&!root.catalog-busy;clicked=>{root.catalog-action(i);}}}
+                        }
+                    }
+                    Rectangle {vertical-stretch:1;}
+                }}
+            }
+        }
+    }
     if root.show-login: Rectangle {background:#b0000000;
         TouchArea {}
         Rectangle {width:360px;height:450px;x:(parent.width - self.width)/2;y:(parent.height - self.height)/2;background:Theme.panel;border-radius:22px;

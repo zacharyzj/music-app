@@ -188,6 +188,9 @@ fn item(x: &Value, kind: &str) -> Item {
         },
         cover,
         duration_ms: x["dt"].as_u64().or(x["duration"].as_u64()).unwrap_or(0),
+        license: String::new(),
+        downloadable: None,
+        search_aliases: Vec::new(),
         album: text(album, "name"),
         artist,
         unavailable: x["privilege"]["st"].as_i64().is_some_and(|n| n < 0)
