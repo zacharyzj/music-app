@@ -4,6 +4,8 @@ export struct PluginRow { name: string, permissions: string, enabled: bool }
 export struct CatalogRow { title: string, description: string, permissions: string, action-label: string, can-install: bool }
 export struct DownloadRow { title:string, artist:string, status:string, fraction:float, active:bool, failed:bool }
 export struct Nav {title:string}
+export enum PlayerMode { sequential, repeat-all, repeat-one, shuffle }
+struct ModeAppearance { name: string, icon: image }
 export global Theme {
     in-out property <bool> dark:true;
     out property <color> bg:dark ? #101014 : #f7f6fa;
@@ -27,6 +29,36 @@ component IconButton inherits Rectangle {
     animate background {duration:140ms;}
     Image {source:root.icon;colorize:root.primary ? Theme.on-accent : root.active ? Theme.accent : Theme.ink;width:18px;height:18px;x:(parent.width - self.width)/2;y:(parent.height - self.height)/2;}
     touch:=TouchArea {enabled:root.enabled;mouse-cursor:pointer;clicked=>{root.clicked();}}
+}
+enum PlayerModifier { none, ctrl, shift }
+struct PlayerKey { modifier: PlayerModifier, key: string }
+global PlayerKeys {
+    public pure function label(binding: PlayerKey) -> string {
+        let key = binding.key;
+        let name = key == Key.LeftArrow ? "Left" : key == Key.RightArrow ? "Right"
+            : key == Key.UpArrow ? "Up" : key == Key.DownArrow ? "Down"
+            : key == Key.Space ? "Space" : key.to-uppercase();
+        return (binding.modifier == PlayerModifier.ctrl ? "Ctrl + "
+            : binding.modifier == PlayerModifier.shift ? "Shift + " : "") + name;
+    }
+}
+component PlayerButton inherits IconButton {
+    in property <string> label;
+    in property <PlayerKey> shortcut;
+    callback activated();
+    forward-focus: button-focus;
+    button-focus := FocusScope { width: 0px; height: 0px; focus-on-tab-navigation: false; }
+    clicked => { button-focus.focus(); root.activated(); }
+    accessible-role: button;
+    accessible-label: root.label;
+    accessible-action-default => { root.clicked(); }
+    Tooltip { text: @markdown("\{root.label} (\{PlayerKeys.label(root.shortcut)})"); }
+
+    public function handle-key(binding: PlayerKey, repeated: bool) -> bool {
+        if binding != root.shortcut { return false; }
+        if !repeated { root.activated(); }
+        return true;
+    }
 }
 component ActionButton inherits Rectangle {
     in property <string> text;
@@ -153,8 +185,13 @@ export component AppWindow inherits Window {
     in property <[string]> playlist-names;
     in-out property <int> playlist-index;
     in property <int> quality-index;
-    in property <int> repeat-mode;
-    in property <bool> shuffle-enabled;
+    in property <PlayerMode> playback-mode: sequential;
+    private property <ModeAppearance> mode-appearance:
+        root.playback-mode == PlayerMode.repeat-all ? { name: "列表循环", icon: @image-url("icons/repeat.svg") } :
+        root.playback-mode == PlayerMode.repeat-one ? { name: "单曲循环", icon: @image-url("icons/repeat-one.svg") } :
+        root.playback-mode == PlayerMode.shuffle ? { name: "随机播放", icon: @image-url("icons/shuffle.svg") } :
+        { name: "顺序播放", icon: @image-url("icons/sequential.svg") };
+    out property <string> playback-mode-name: root.mode-appearance.name;
     in property <string> heading:"本地音乐";
     in property <string> status:"添加音乐文件夹，开始聆听";
     in property <string> now-title:"还没有正在播放的歌曲";
@@ -169,8 +206,16 @@ export component AppWindow inherits Window {
     in property <bool> has-error;
     in property <bool> more;
     in property <string> next-label:"加载更多";
-    in property <float> position;
+    in-out property <float> position;
+    out property <bool> scrubbing;
     in property <float> duration;
+    private property <float> last-audible-volume: 70;
+    out property <float> volume-level: root.last-audible-volume;
+    private property <PlayerKey> volume-up: { modifier: ctrl, key: Key.UpArrow };
+    private property <PlayerKey> volume-down: { modifier: ctrl, key: Key.DownArrow };
+    private property <PlayerKey> seek-back: { modifier: shift, key: Key.LeftArrow };
+    private property <PlayerKey> seek-forward: { modifier: shift, key: Key.RightArrow };
+    private property <PlayerKey> shuffle-shortcut: { modifier: ctrl, key: "s" };
     in property <string> time-label:"00:00 / 00:00";
     in property <image> qr;
     in property <string> login-message;
@@ -190,6 +235,11 @@ export component AppWindow inherits Window {
     callback plugin-action(int,string);
     callback seek(float);
     callback volume(float);
+    public function set-player-volume(value: float) {
+        root.volume-level = clamp(value, 0, 100);
+        if root.volume-level > 0 { root.last-audible-volume = root.volume-level; }
+        root.volume(root.volume-level);
+    }
     callback playlist-create(string);
     callback playlist-manage(string,string);
     callback quality(string);
@@ -198,7 +248,41 @@ export component AppWindow inherits Window {
         // The native window owns the size. Content adapts inside it instead of
         // feeding its preferred/minimum sizes back into the window constraints.
         x:0px;y:0px;width:root.width;height:root.height;
-        key-pressed(event)=>{if event.text==Key.F7{root.action("pause");return accept;}if event.text==Key.F8{root.action("next");return accept;}return reject;}
+        capture-key-pressed(event) => {
+            if TextInputInterface.text-input-focused || root.show-catalog || root.show-login
+                || event.modifiers.alt || event.modifiers.meta || (event.modifiers.control && event.modifiers.shift) {
+                return reject;
+            }
+            let binding = { key: event.text.to-lowercase(), modifier: event.modifiers.control ? PlayerModifier.ctrl
+                : event.modifiers.shift ? PlayerModifier.shift : PlayerModifier.none };
+            if mode-button.handle-key(binding, event.repeat) || previous.handle-key(binding, event.repeat)
+                || play-pause.handle-key(binding, event.repeat) || next-track.handle-key(binding, event.repeat)
+                || queue-button.handle-key(binding, event.repeat) || lyrics-button.handle-key(binding, event.repeat)
+                || mute.handle-key(binding, event.repeat) {
+                return accept;
+            }
+            if binding == root.shuffle-shortcut {
+                if !event.repeat { root.action("shuffle"); }
+                return accept;
+            }
+            if binding.modifier == PlayerModifier.none && (event.text == Key.F7 || event.text == Key.F8) {
+                if !event.repeat {
+                    if event.text == Key.F7 { play-pause.activated(); } else { next-track.activated(); }
+                }
+                return accept;
+            }
+            if binding == root.volume-up || binding == root.volume-down {
+                root.set-player-volume(root.volume-level + (binding == root.volume-up ? 10 : -10));
+                return accept;
+            }
+            if binding == root.seek-back || binding == root.seek-forward {
+                if root.duration > 0 {
+                    root.seek(clamp(root.position + (binding == root.seek-forward ? 5 : -5), 0, root.duration));
+                }
+                return accept;
+            }
+            return reject;
+        }
         VerticalLayout {spacing:0;
             HorizontalLayout {spacing:0;min-height:0px;vertical-stretch:1;
                 Rectangle {width:root.sidebar-width;background:Theme.dark ? #15151c : #eeebf3;
@@ -373,63 +457,104 @@ export component AppWindow inherits Window {
 
             }
             Rectangle {height:root.player-height;background:Theme.dark ? #1b1b23 : #ffffff;
-                Rectangle{height:1px;background:Theme.line;}
                 HorizontalLayout {padding-left:root.compact ? 16px : 25px;padding-right:root.compact ? 16px : 25px;padding-top:root.compact ? 10px : 16px;padding-bottom:12px;spacing:root.compact ? 16px : 25px;
                     HorizontalLayout {width:root.compact ? 180px : 265px;spacing:root.compact ? 10px : 13px;Cover {source:root.now-cover;width:root.compact ? 48px : 62px;height:self.width;border-radius:12px;}VerticalLayout {alignment:center;spacing:6px;Text {text:root.now-title;color:Theme.ink;font-size:13px;font-weight:600;overflow:elide;min-width:0px;}Text {text:root.now-artist;color:Theme.muted;font-size:11px;overflow:elide;min-width:0px;}}}
                     VerticalLayout {horizontal-stretch:1;spacing:8px;
                         HorizontalLayout {alignment:center;spacing:root.compact ? 8px : 16px;height:42px;
-                            IconButton {icon:@image-url("icons/shuffle.svg");active:root.shuffle-enabled;clicked=>{root.action("shuffle");}}
-                            IconButton {icon:@image-url("icons/previous.svg");clicked=>{root.action("previous");}}
-                            IconButton {icon:root.playing?@image-url("icons/pause.svg"):@image-url("icons/play.svg");primary:true;width:42px;height:42px;clicked=>{root.action("pause");}}
-                            IconButton {icon:@image-url("icons/next.svg");clicked=>{root.action("next");}}
-                            IconButton {icon:@image-url("icons/repeat.svg");active:root.repeat-mode>0;clicked=>{root.action("repeat");}if root.repeat-mode==2:Text {text:"1";color:Theme.accent;font-size:8px;x:14px;y:12px;}}
+                            mode-button := PlayerButton {
+                                icon: root.mode-appearance.icon; active: root.playback-mode != PlayerMode.sequential;
+                                label: root.playback-mode-name + " · 切换模式"; shortcut: { modifier: ctrl, key: "r" };
+                                activated => { root.action("cycle-mode"); }
+                            }
+                            previous := PlayerButton {
+                                icon: @image-url("icons/previous.svg");
+                                label: "上一首"; shortcut: { modifier: ctrl, key: Key.LeftArrow };
+                                activated => { root.action("previous"); }
+                            }
+                            play-pause := PlayerButton {
+                                icon: root.playing ? @image-url("icons/pause.svg") : @image-url("icons/play.svg");
+                                primary: true; width: 42px; height: 42px;
+                                label: root.playing ? "暂停" : "播放"; shortcut: { modifier: none, key: Key.Space };
+                                activated => { root.action("pause"); }
+                            }
+                            next-track := PlayerButton {
+                                icon: @image-url("icons/next.svg");
+                                label: "下一首"; shortcut: { modifier: ctrl, key: Key.RightArrow };
+                                activated => { root.action("next"); }
+                            }
+                            queue-button := PlayerButton {
+                                icon: @image-url("icons/queue.svg"); active: root.show-queue;
+                                label: root.show-queue ? "关闭播放列表" : "打开播放列表"; shortcut: { modifier: ctrl, key: "p" };
+                                activated => { root.show-queue = !root.show-queue; root.show-downloads = false; }
+                            }
                         }
-                        HorizontalLayout {spacing:12px;Slider {minimum:0;maximum:root.duration>0?root.duration:1;value:root.position;released(v)=>{root.seek(v);}}Text {text:root.time-label;color:Theme.muted;font-size:10px;vertical-alignment:center;width:root.compact ? 78px : 100px;}}
+                        HorizontalLayout {spacing:12px;
+                            Slider {
+                                minimum: 0; maximum: root.duration > 0 ? root.duration : 1; value <=> root.position;
+                                changed(_) => { root.scrubbing = true; }
+                                released(v) => { root.scrubbing = false; root.seek(v); }
+                                changed has-focus => { if !self.has-focus { root.scrubbing = false; } }
+                                Tooltip { text: @markdown("后退 / 前进 5 秒 (\{PlayerKeys.label(root.seek-back)} / \{PlayerKeys.label(root.seek-forward)})"); }
+                            }
+                            Text {text:root.time-label;color:Theme.muted;font-size:10px;vertical-alignment:center;width:root.compact ? 78px : 100px;}
+                        }
                     }
-                    VerticalLayout {width:root.compact ? 148px : 220px;alignment:center;HorizontalLayout {height:36px;spacing:8px;
-                        IconButton {icon:@image-url("icons/lyrics.svg");active:root.show-lyrics;clicked=>{root.show-lyrics=!root.show-lyrics;root.show-settings=false;}}
-                        IconButton {icon:@image-url("icons/queue.svg");active:root.show-queue;clicked=>{root.show-queue=!root.show-queue;root.show-downloads=false;}}
-                        if !root.compact: Glyph {source:@image-url("icons/volume.svg");}
-                        Slider {width:root.compact ? 60px : 85px;minimum:0;maximum:100;value:70;changed(v)=>{root.volume(v);}}
+                    VerticalLayout {width:root.compact ? 172px : 220px;alignment:center;HorizontalLayout {height:36px;alignment:end;spacing:root.compact ? 4px : 8px;
+                        lyrics-button := PlayerButton {
+                            icon: @image-url("icons/lyrics.svg"); active: root.show-lyrics;
+                            label: root.show-lyrics ? "关闭歌词" : "打开歌词"; shortcut: { modifier: ctrl, key: "l" };
+                            activated => { root.show-lyrics = !root.show-lyrics; root.show-settings = false; }
+                        }
+                        mute := PlayerButton {
+                            icon: root.volume-level > 0 ? @image-url("icons/volume.svg") : @image-url("icons/volume-muted.svg");
+                            active: root.volume-level == 0;
+                            label: root.volume-level > 0 ? "静音" : "取消静音"; shortcut: { modifier: ctrl, key: "m" };
+                            activated => { root.set-player-volume(root.volume-level > 0 ? 0 : root.last-audible-volume); }
+                        }
+                        Slider {
+                            width: root.compact ? 52px : 85px; minimum: 0; maximum: 100; value <=> root.volume-level;
+                            changed(v) => { root.set-player-volume(v); }
+                            Tooltip { text: @markdown("音量 \{round(root.volume-level)}% (\{PlayerKeys.label(root.volume-down)} / \{PlayerKeys.label(root.volume-up)})"); }
+                        }
                     }}
                 }
             }
         }
-    }
-    if root.show-queue: Rectangle {width:300px;height:parent.height - root.player-height;x:parent.width - self.width;y:0px;background:Theme.panel;
-                    TouchArea {}
-                    VerticalLayout {padding:18px;spacing:18px;HorizontalLayout {Text {text:"接下来播放";color:Theme.ink;font-size:18px;font-weight:600;horizontal-stretch:1;}IconButton {icon:@image-url("icons/close.svg");clicked=>{root.show-queue=false;}}}Text{text:root.queue.length+" 首歌曲";color:Theme.muted;}
-                        ScrollView {VerticalLayout {spacing:10px;for row[i] in root.queue: Rectangle {height:54px;HorizontalLayout {spacing:8px;Cover {source:row.cover;width:40px;height:40px;border-radius:7px;}Text {text:row.title;color:Theme.ink;font-size:12px;overflow:elide;min-width:0px;horizontal-stretch:1;vertical-alignment:center;}IconButton {icon:@image-url("icons/play.svg");clicked=>{root.queue-action(i,"play");}}IconButton {width:26px;icon:@image-url("icons/close.svg");clicked=>{root.queue-action(i,"remove");}}}}}}
+        if root.show-queue: Rectangle {width:300px;height:parent.height - root.player-height;x:parent.width - self.width;y:0px;background:Theme.panel;
+                        TouchArea {}
+                        VerticalLayout {padding:18px;spacing:18px;HorizontalLayout {Text {text:"接下来播放";color:Theme.ink;font-size:18px;font-weight:600;horizontal-stretch:1;}IconButton {icon:@image-url("icons/close.svg");clicked=>{root.show-queue=false;}}}Text{text:root.queue.length+" 首歌曲";color:Theme.muted;}
+                            ScrollView {VerticalLayout {spacing:10px;for row[i] in root.queue: Rectangle {height:54px;HorizontalLayout {spacing:8px;Cover {source:row.cover;width:40px;height:40px;border-radius:7px;}Text {text:row.title;color:Theme.ink;font-size:12px;overflow:elide;min-width:0px;horizontal-stretch:1;vertical-alignment:center;}IconButton {icon:@image-url("icons/play.svg");clicked=>{root.queue-action(i,"play");}}IconButton {width:26px;icon:@image-url("icons/close.svg");clicked=>{root.queue-action(i,"remove");}}}}}}
+                        }
                     }
+        if root.show-downloads: Rectangle {
+            width:min(380px, parent.width);height:parent.height - root.player-height;
+            x:parent.width - self.width;y:0px;background:Theme.panel;border-width:1px;border-color:Theme.line;
+            TouchArea {}
+            VerticalLayout {padding:18px;spacing:12px;
+                HorizontalLayout {height:36px;
+                    Text {text:"下载队列";font-size:19px;font-weight:600;color:Theme.ink;horizontal-stretch:1;vertical-alignment:center;}
+                    IconButton {icon:@image-url("icons/close.svg");clicked=>{root.show-downloads=false;}}
                 }
-    if root.show-downloads: Rectangle {
-        width:min(380px, parent.width);height:parent.height - root.player-height;
-        x:parent.width - self.width;y:0px;background:Theme.panel;border-width:1px;border-color:Theme.line;
-        TouchArea {}
-        VerticalLayout {padding:18px;spacing:12px;
-            HorizontalLayout {height:36px;
-                Text {text:"下载队列";font-size:19px;font-weight:600;color:Theme.ink;horizontal-stretch:1;vertical-alignment:center;}
-                IconButton {icon:@image-url("icons/close.svg");clicked=>{root.show-downloads=false;}}
-            }
-            if root.downloads.length==0: Text {text:"暂无下载任务";color:Theme.muted;horizontal-alignment:center;vertical-alignment:center;vertical-stretch:1;}
-            if root.downloads.length>0: ScrollView {VerticalLayout {alignment:start;spacing:8px;
-                for task[i] in root.downloads: Rectangle {height:task.failed ? 100px : 78px;border-radius:10px;background:Theme.elevated;
-                    VerticalLayout {padding:10px;spacing:4px;
-                        HorizontalLayout {spacing:6px;
-                            VerticalLayout {horizontal-stretch:1;
-                                Text {text:task.title;font-size:14px;font-weight:600;color:Theme.ink;min-width:0px;overflow:elide;}
-                                Text {text:task.artist;font-size:11px;color:Theme.muted;min-width:0px;overflow:elide;}
+                if root.downloads.length==0: Text {text:"暂无下载任务";color:Theme.muted;horizontal-alignment:center;vertical-alignment:center;vertical-stretch:1;}
+                if root.downloads.length>0: ScrollView {VerticalLayout {alignment:start;spacing:8px;
+                    for task[i] in root.downloads: Rectangle {height:task.failed ? 100px : 78px;border-radius:10px;background:Theme.elevated;
+                        VerticalLayout {padding:10px;spacing:4px;
+                            HorizontalLayout {spacing:6px;
+                                VerticalLayout {horizontal-stretch:1;
+                                    Text {text:task.title;font-size:14px;font-weight:600;color:Theme.ink;min-width:0px;overflow:elide;}
+                                    Text {text:task.artist;font-size:11px;color:Theme.muted;min-width:0px;overflow:elide;}
+                                }
+                                if task.failed: ActionButton {text:"重试";clicked=>{root.download-action(i,"retry");}}
+                                if !task.active: IconButton {width:26px;icon:@image-url("icons/close.svg");clicked=>{root.download-action(i,"remove");}}
                             }
-                            if task.failed: ActionButton {text:"重试";clicked=>{root.download-action(i,"retry");}}
-                            if !task.active: IconButton {width:26px;icon:@image-url("icons/close.svg");clicked=>{root.download-action(i,"remove");}}
-                        }
-                        Text {text:task.status;font-size:11px;color:task.failed ? #d98796 : Theme.muted;wrap:word-wrap;overflow:elide;min-width:0px;}
-                        if task.active: Rectangle {height:3px;border-radius:2px;background:Theme.line;
-                            Rectangle {height:parent.height;width:parent.width*task.fraction;border-radius:2px;background:Theme.accent;}
+                            Text {text:task.status;font-size:11px;color:task.failed ? #d98796 : Theme.muted;wrap:word-wrap;overflow:elide;min-width:0px;}
+                            if task.active: Rectangle {height:3px;border-radius:2px;background:Theme.line;
+                                Rectangle {height:parent.height;width:parent.width*task.fraction;border-radius:2px;background:Theme.accent;}
+                            }
                         }
                     }
-                }
-            }}
+                }}
+            }
         }
     }
     if root.show-catalog: Rectangle {

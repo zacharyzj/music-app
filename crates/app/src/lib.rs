@@ -23,6 +23,18 @@ use std::{
     time::{Duration, Instant},
 };
 slint::include_modules!();
+
+impl From<PlaybackMode> for PlayerMode {
+    fn from(mode: PlaybackMode) -> Self {
+        match mode {
+            PlaybackMode::Sequential => Self::Sequential,
+            PlaybackMode::RepeatAll => Self::RepeatAll,
+            PlaybackMode::RepeatOne => Self::RepeatOne,
+            PlaybackMode::Shuffle => Self::Shuffle,
+        }
+    }
+}
+
 struct Job {
     source: String,
     request: Request,
@@ -435,8 +447,7 @@ pub fn run_at(root: PathBuf) -> Result<()> {
     let library = Library::open(&root)?;
     let restored: Queue = serde_json::from_value(library.get("queue")).unwrap_or_default();
     ui.set_dark(library.get("dark").as_bool().unwrap_or(true));
-    ui.set_repeat_mode(restored.repeat as i32);
-    ui.set_shuffle_enabled(restored.shuffle);
+    ui.set_playback_mode(restored.playback_mode().into());
     let plugin_dir = root.join("plugins");
     std::fs::create_dir_all(&plugin_dir)?;
     let plugins = plugin_list(&plugin_dir, &library);
@@ -491,6 +502,7 @@ pub fn run_at(root: PathBuf) -> Result<()> {
         std::env::var_os("MUSIC_API_MPV").as_deref().map(Path::new),
     ));
     let ptx = player.commands.clone();
+    let _ = ptx.send(Command::Volume(ui.get_volume_level() as f64));
     {
         let mut s = state.borrow_mut();
         update_plugins(&ui, &mut s);
@@ -798,22 +810,14 @@ pub fn run_at(root: PathBuf) -> Result<()> {
                     play(&ui, &mut s, &job, &genr, &pc, t);
                 }
             }
-            "repeat" => {
-                s.queue.repeat = (s.queue.repeat + 1) % 3;
-                ui.set_repeat_mode(s.queue.repeat as i32);
-                ui.set_status(["顺序播放", "列表循环", "单曲循环"][s.queue.repeat as usize].into());
-            }
-            "shuffle" => {
-                s.queue.shuffle = !s.queue.shuffle;
-                ui.set_shuffle_enabled(s.queue.shuffle);
-                ui.set_status(
-                    if s.queue.shuffle {
-                        "随机播放"
-                    } else {
-                        "顺序播放"
-                    }
-                    .into(),
-                );
+            "cycle-mode" | "shuffle" => {
+                if a == "shuffle" {
+                    s.queue.toggle_shuffle();
+                } else {
+                    s.queue.cycle_playback_mode();
+                }
+                ui.set_playback_mode(s.queue.playback_mode().into());
+                ui.set_status(ui.get_playback_mode_name());
             }
             "play-all" => {
                 s.queue.items = s
@@ -1606,7 +1610,9 @@ pub fn run_at(root: PathBuf) -> Result<()> {
                         ui.set_playing(false);
                     }
                     PlayerEvent::Position(p, d) => {
-                        ui.set_position(p as f32);
+                        if !ui.get_scrubbing() {
+                            ui.set_position(p as f32);
+                        }
                         ui.set_duration(d as f32);
                         ui.set_time_label(
                             format!(
@@ -1782,7 +1788,7 @@ pub fn run_at(root: PathBuf) -> Result<()> {
                 let play_window = ui.as_weak();
                 slint::Timer::single_shot(Duration::from_secs(6), move || {
                     if let Some(ui) = play_window.upgrade() {
-                        ui.invoke_volume(5.0);
+                        ui.invoke_set_player_volume(5.0);
                         ui.invoke_row_action(0, "open".into());
                     }
                 });

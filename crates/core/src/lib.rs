@@ -112,28 +112,67 @@ pub struct Setting {
 pub trait MusicSource {
     fn call(&mut self, request: Request) -> SourceResult;
 }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PlaybackMode {
+    Sequential,
+    RepeatAll,
+    RepeatOne,
+    Shuffle,
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Queue {
     pub items: Vec<Item>,
     pub index: Option<usize>,
-    pub repeat: u8,
-    pub shuffle: bool,
+    // Keep the existing queue format and remember the mode to restore after shuffle.
+    #[serde(default)]
+    repeat: u8,
+    #[serde(default)]
+    shuffle: bool,
 }
 impl Queue {
+    pub fn playback_mode(&self) -> PlaybackMode {
+        match (self.shuffle, self.repeat) {
+            (true, _) => PlaybackMode::Shuffle,
+            (false, 1) => PlaybackMode::RepeatAll,
+            (false, 2) => PlaybackMode::RepeatOne,
+            _ => PlaybackMode::Sequential,
+        }
+    }
+
+    pub fn cycle_playback_mode(&mut self) {
+        match self.playback_mode() {
+            PlaybackMode::Sequential => self.repeat = 1,
+            PlaybackMode::RepeatAll => self.repeat = 2,
+            PlaybackMode::RepeatOne => self.shuffle = true,
+            PlaybackMode::Shuffle => {
+                self.shuffle = false;
+                self.repeat = 0;
+            }
+        }
+    }
+
+    pub fn toggle_shuffle(&mut self) {
+        self.shuffle = !self.shuffle;
+    }
+
     pub fn advance(&mut self, natural: bool, random: u64) -> Option<Item> {
-        if self.items.is_empty() {
+        let count = self.items.len();
+        if count == 0 {
             self.index = None;
             return None;
         }
-        let old = self.index;
-        let next = match old {
+        let mode = self.playback_mode();
+        let next = match self.index.filter(|&i| i < count) {
+            None if mode == PlaybackMode::Shuffle => random as usize % count,
             None => 0,
-            Some(i) if natural && self.repeat == 2 => i,
-            Some(i) if self.shuffle && self.items.len() > 1 => {
-                (i + 1 + random as usize % (self.items.len() - 1)) % self.items.len()
+            Some(i) if natural && mode == PlaybackMode::RepeatOne => i,
+            Some(i) if mode == PlaybackMode::Shuffle && count > 1 => {
+                (i + 1 + random as usize % (count - 1)) % count
             }
-            Some(i) if i + 1 < self.items.len() => i + 1,
-            Some(_) if self.repeat == 1 => 0,
+            Some(i) if i + 1 < count => i + 1,
+            Some(_) if matches!(mode, PlaybackMode::RepeatAll | PlaybackMode::Shuffle) => 0,
             _ => return None,
         };
         self.index = Some(next);
@@ -199,8 +238,61 @@ mod tests {
         assert!(q.advance(true, 0).is_none());
         q.remove(0);
         assert_eq!(q.index, Some(0));
-        q.repeat = 1;
+        q.cycle_playback_mode();
         assert!(q.advance(true, 0).is_some());
+    }
+
+    #[test]
+    fn playback_mode_drives_manual_and_automatic_advance() {
+        use PlaybackMode::*;
+        let mut q = Queue {
+            items: vec![Item::default(); 3],
+            index: Some(2),
+            ..Default::default()
+        };
+        assert_eq!(q.playback_mode(), Sequential);
+        assert!(q.advance(true, 0).is_none());
+        q.cycle_playback_mode();
+        assert_eq!(q.playback_mode(), RepeatAll);
+        assert!(q.advance(true, 0).is_some());
+        assert_eq!(q.index, Some(0));
+        q.cycle_playback_mode();
+        assert_eq!(q.playback_mode(), RepeatOne);
+        assert!(q.advance(true, 1).is_some());
+        assert_eq!(q.index, Some(0));
+        assert!(q.advance(false, 1).is_some());
+        assert_eq!(q.index, Some(1));
+        q.cycle_playback_mode();
+        assert_eq!(q.playback_mode(), Shuffle);
+        assert!(q.advance(true, 1).is_some());
+        assert_eq!(q.index, Some(0));
+        q.index = None;
+        assert!(q.advance(false, 2).is_some());
+        assert_eq!(q.index, Some(2));
+        q.items.truncate(1);
+        q.index = Some(0);
+        assert!(q.advance(true, 0).is_some());
+        q.cycle_playback_mode();
+        assert_eq!(q.playback_mode(), Sequential);
+        assert!(q.advance(true, 0).is_none());
+    }
+
+    #[test]
+    fn legacy_queue_restores_one_mode_and_remembers_the_previous_repeat_setting() {
+        let old = serde_json::json!({
+            "items": [{"title":"A"}], "index":0, "repeat":2, "shuffle":true
+        });
+        let mut queue: Queue = serde_json::from_value(old).unwrap();
+        assert_eq!(queue.playback_mode(), PlaybackMode::Shuffle);
+        queue.toggle_shuffle();
+        assert_eq!(queue.playback_mode(), PlaybackMode::RepeatOne);
+        queue.toggle_shuffle();
+        let saved = serde_json::to_value(&queue).unwrap();
+        assert_eq!(saved["repeat"], 2);
+        assert_eq!(saved["shuffle"], true);
+        let restored: Queue = serde_json::from_value(saved).unwrap();
+        assert_eq!(restored.playback_mode(), PlaybackMode::Shuffle);
+        assert_eq!(restored.items[restored.index.unwrap()].title, "A");
     }
     #[test]
     fn lrc_multiple_offset() {
