@@ -154,6 +154,10 @@ fn netease_liked_tracks_sort_by_add_time_before_paging() {
             .call(Request::new("playlist", json!({"id":"10"})))
             .unwrap();
         assert_eq!(page_ids(&playlist), expected);
+        assert_eq!(
+            playlist["heartbeatPlaylistId"].as_str(),
+            (special_type == 5).then_some("10")
+        );
     }
 
     // A successful edit invalidates the old page order. Missing playlist metadata falls back to membership.
@@ -166,6 +170,7 @@ fn netease_liked_tracks_sort_by_add_time_before_paging() {
     let fallback = s.call(Request::new("liked", json!({"offset":1}))).unwrap();
     assert_eq!(page_ids(&fallback), [7, 8]);
     assert_eq!(fallback["title"], "喜欢的歌曲 · 网易云返回顺序");
+    assert!(fallback["heartbeatPlaylistId"].is_null());
     assert_eq!(
         s.call(Request::new("isLiked", json!({"ids":["9","3"]})))
             .unwrap(),
@@ -188,6 +193,66 @@ fn netease_liked_tracks_sort_by_add_time_before_paging() {
         assert_eq!(page_ids(&page), expected);
         assert_eq!(page["title"], title);
     }
+}
+
+#[test]
+fn netease_heartbeat_mixes_owned_favorites_with_playable_new_tracks() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = session(upstream(), dir.path());
+    let mix = |id: &str| {
+        Request::new(
+            "heartbeat",
+            json!({"playlistId":id,"currentId":"1","recent":["1","91"]}),
+        )
+    };
+    assert!(s.call(mix("10")).unwrap_err().to_string().contains("登录"));
+    {
+        let mut host = s.host.borrow_mut();
+        host.storage.set("account", json!({"id":"7"})).unwrap();
+        host.storage
+            .set("cookies", json!({"MUSIC_U":"fixture"}))
+            .unwrap();
+        host.fixture = Some(json!({
+            "user/playlist":{"playlist":[{"id":9,"userId":8,"specialType":5},{"id":10,"userId":7,"specialType":5}]},
+            "v6/playlist/detail":{"playlist":{"trackIds":[{"id":1},{"id":2},{"id":3}],"trackCount":3}},
+            "v3/song/detail":{"songs":[{"id":1,"name":"种子"},{"id":2,"name":"收藏甲"},{"id":3,"name":"收藏乙"},{"id":94,"name":"补全推荐"}]},
+            "playmode/intelligence/list":{"data":[{"id":2},{"id":91},{"id":92,"songInfo":{"id":92,"name":"已下架","privilege":{"st":-1}}},
+                {"id":93,"songInfo":{"id":93,"name":"新推荐"}},{"id":93},{"id":94},{"id":"bad"}]}
+        }));
+    }
+    let liked = s.call(Request::new("liked", json!({}))).unwrap();
+    assert_eq!(liked["heartbeatPlaylistId"], "10");
+    assert!(
+        s.call(mix("9"))
+            .unwrap_err()
+            .to_string()
+            .contains("当前账号")
+    );
+    let batch = s.call(mix("10")).unwrap();
+    let items = batch["items"].as_array().unwrap();
+    assert_eq!(items.len(), 4);
+    assert_eq!(items[0]["key"]["id"], "93");
+    assert_eq!(items[2]["key"]["id"], "94");
+    assert_eq!(items[2]["title"], "补全推荐");
+    let favorites: std::collections::HashSet<_> = [
+        items[1]["key"]["id"].as_str().unwrap(),
+        items[3]["key"]["id"].as_str().unwrap(),
+    ]
+    .into();
+    assert_eq!(favorites, ["2", "3"].into());
+    for (i, item) in items.iter().enumerate() {
+        assert_eq!(item["heartbeat_recommendation"], i % 2 == 0);
+        assert_eq!(item["key"]["source"], "netease");
+    }
+    s.host.borrow_mut().fixture.as_mut().unwrap()["playmode/intelligence/list"] =
+        json!({"data":[]});
+    let empty = s
+        .call(Request::new(
+            "heartbeat",
+            json!({"playlistId":"10","currentId":"93","recent":["1","2","3"]}),
+        ))
+        .unwrap();
+    assert!(empty["items"].as_array().unwrap().is_empty());
 }
 
 #[test]

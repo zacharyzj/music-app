@@ -55,17 +55,13 @@ impl Workers {
 
     fn obsolete(&self, job: &Job) -> bool {
         job.generation != self.generation.load(Ordering::Relaxed)
-            && matches!(
-                job.request.op.as_str(),
-                "search"
-                    | "home"
-                    | "browse"
-                    | "album"
-                    | "artist"
-                    | "playlist"
-                    | "isLiked"
-                    | "loginPoll"
-            )
+            && match job.request.op.as_str() {
+                "search" | "home" | "browse" | "album" | "artist" | "playlist" | "loginPoll" => {
+                    true
+                }
+                "isLiked" => job.generation != super::favorites::TRACK_SCOPE,
+                _ => false,
+            }
     }
 
     fn spawn_plugin(self: &Arc<Self>) -> PluginWorker {
@@ -210,6 +206,7 @@ impl Workers {
                     | "playlist"
                     | "playlists"
                     | "liked"
+                    | "heartbeat"
                     | "like"
                     | "savedAlbums"
                     | "saveAlbum"
@@ -269,6 +266,16 @@ impl Workers {
         drop(db);
         let bytes = std::fs::read(package)?;
         let data = self.root.join("plugin-data");
+        if op == "heartbeat" {
+            ensure!(
+                source == "netease"
+                    && manifest(&bytes)?
+                        .capabilities
+                        .iter()
+                        .any(|c| c == "heartbeat"),
+                "当前音乐源不支持心动模式"
+            );
+        }
         if op == "resolve" {
             let m = manifest(&bytes)?;
             let mut stream = json!({"id":args["id"]});

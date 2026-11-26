@@ -56,6 +56,10 @@ API 请求必须为清单允许的 HTTPS 域名；支持精确域名和 `*.examp
 
 继续使用同一系统凭据项及 AES-GCM 文件 `plugin-data/{id}.enc`。网易云原 `cookies/account/quality` 可直接读取，`device` 自动补入 `deviceId`。安装新版应直接覆盖导入，不能先卸载。旧 `.wasm` 不再由应用加载，协议保存在 `legacy/wasm-protocol.md`。
 
+## 网易云心动模式
+
+网易云插件声明 `heartbeat` 能力。登录后，`liked` 和当前用户的固定收藏歌单详情会返回 `heartbeatPlaylistId`。播放器在这两个页面将「心动模式」加到底部播放模式的循环中（随机播放 → 心动模式 → 顺序播放），将正在播放的歌曲和最近的队列传给 `heartbeat({ playlistId, currentId, recent })`。插件按歌单从网易云获取推荐，穿插随机收藏，返回的 `tracks` 中用 `heartbeatRecommendation` 标出歌单外的歌曲。播放仍通过 `stream` 获取授权。点击模式按钮或按 Ctrl + R 可切回顺序播放，Ctrl + S 可直接回到随机播放。退出心动模式会恢复普通收藏队列。
+
 ## 联机搜索和下载
 
 插件在 `plugin.json` 的 `capabilities` 数组中声明 `download`，并通过 `permissions.media` 指定音频域名。插件导出 `download({ id })`，成功时返回 `{ url, size?, attribution? }`，失败时抛出可显示的错误。宿主只向此接口请求下载地址，校验 HTTPS 地址、重定向域名、文件长度和音频格式，再保存并索引文件。`attribution` 会随歌曲保存为 UTF-8 文本。

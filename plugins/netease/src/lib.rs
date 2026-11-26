@@ -193,6 +193,7 @@ fn item(x: &Value, kind: &str) -> Item {
         search_aliases: Vec::new(),
         album: text(album, "name"),
         artist,
+        heartbeat_recommendation: false,
         unavailable: x["privilege"]["st"].as_i64().is_some_and(|n| n < 0)
             || x["noCopyrightRcmd"].is_object(),
     }

@@ -202,6 +202,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "arc-swap"
+version = "1.9.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c049c0be4daef0b145cb3555416b3b8ef5b7888a38aea1a3a155801fe7b0810b"
+dependencies = [
+ "rustversion",
+]
+
+[[package]]
 name = "arrayref"
 version = "0.3.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -968,6 +977,15 @@ name = "crossbeam-epoch"
 version = "0.9.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dc74980687109a3b14c72fd458107bf0baa1da1a1a805e178d15501ba9b86d9d"
+dependencies = [
+ "crossbeam-utils",
+]
+
+[[package]]
+name = "crossbeam-queue"
+version = "0.3.14"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "03e8bd762f7479489c70ed6c768ddca99d7296857de437a68dcb2a94365b3fae"
 dependencies = [
  "crossbeam-utils",
 ]
@@ -2162,6 +2180,7 @@ version = "1.19.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8764dedbc051cd5813c320dfe91e0c5be99169f171e1385c6fc183ae7e1b90ba"
 dependencies = [
+ "async-channel",
  "bitflags 2.13.2",
  "bytemuck",
  "chrono",
@@ -2174,6 +2193,7 @@ dependencies = [
  "icu_normalizer",
  "image",
  "js-sys",
+ "ksni",
  "lyon_algorithms",
  "lyon_extra",
  "lyon_geom",
@@ -2738,6 +2758,26 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e2db585e1d738fc771bf08a151420d3ed193d9d895a36df7f6f8a9456b911ddc"
 
 [[package]]
+name = "ksni"
+version = "0.3.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1bcc1cb43797140f74b711f1c4a49f48a7a7429f211c5fb78264e7bcd1e99caf"
+dependencies = [
+ "arc-swap",
+ "async-executor",
+ "async-io",
+ "async-lock",
+ "crossbeam-queue",
+ "futures-channel",
+ "futures-lite",
+ "futures-util",
+ "pastey",
+ "serde",
+ "task-local",
+ "zbus 5.19.0",
+]
+
+[[package]]
 name = "kurbo"
 version = "0.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3060,7 +3100,7 @@ dependencies = [
 
 [[package]]
 name = "music-app"
-version = "0.2.10"
+version = "0.2.11"
 dependencies = [
  "anyhow",
  "directories",
@@ -3084,7 +3124,7 @@ dependencies = [
 
 [[package]]
 name = "music-core"
-version = "0.2.10"
+version = "0.2.11"
 dependencies = [
  "serde",
  "serde_json",
@@ -3092,7 +3132,7 @@ dependencies = [
 
 [[package]]
 name = "music-library"
-version = "0.2.10"
+version = "0.2.11"
 dependencies = [
  "anyhow",
  "lofty",
@@ -3107,7 +3147,7 @@ dependencies = [
 
 [[package]]
 name = "music-player"
-version = "0.2.10"
+version = "0.2.11"
 dependencies = [
  "anyhow",
  "libloading",
@@ -3118,7 +3158,7 @@ dependencies = [
 
 [[package]]
 name = "music-plugin-host"
-version = "0.2.10"
+version = "0.2.11"
 dependencies = [
  "aes",
  "aes-gcm",
@@ -3141,7 +3181,7 @@ dependencies = [
 
 [[package]]
 name = "music-plugin-sdk"
-version = "0.2.10"
+version = "0.2.11"
 dependencies = [
  "music-core",
  "serde_json",
@@ -3246,7 +3286,7 @@ dependencies = [
 
 [[package]]
 name = "netease"
-version = "0.2.10"
+version = "0.2.11"
 dependencies = [
  "aes",
  "ecb",
@@ -3874,6 +3914,12 @@ name = "paste"
 version = "1.0.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "57c0d7b74b563b49d38dae00a0c37d4d6de9b432382b2892f0574ddcae73fd0a"
+
+[[package]]
+name = "pastey"
+version = "0.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2ee67f1008b1ba2321834326597b8e186293b049a023cdef258527550b9935b4"
 
 [[package]]
 name = "percent-encoding"
@@ -5406,6 +5452,15 @@ dependencies = [
  "filetime",
  "libc",
  "xattr",
+]
+
+[[package]]
+name = "task-local"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2972044a9e5e448a506a7ff6f0d03b566d8ef4cd6918a58fc59835a0f8666626"
+dependencies = [
+ "pin-project-lite",
 ]
 
 [[package]]
@@ -6962,7 +7017,7 @@ checksum = "ec7a2a501ed189703dba8b08142f057e887dfc4b2cc4db2d343ac6376ba3e0b9"
 
 [[package]]
 name = "xtask"
-version = "0.2.10"
+version = "0.2.11"
 dependencies = [
  "anyhow",
  "music-core",

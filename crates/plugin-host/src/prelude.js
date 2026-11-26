@@ -59,9 +59,12 @@ globalThis.__dispatch=async(op,args,source)=>{
     if(op==='playlists'){values=v.slice(offset,offset+50);more=offset+50<v.length}
     if(op==='savedAlbums')more=v.length>=50;
     items=values.map(x=>item(x,kind,source));
+  }else if(op==='heartbeat'){
+    items=(v?.tracks||[]).map(t=>({...item(t,'track',source),heartbeat_recommendation:!!t.heartbeatRecommendation}));
   }else if(v?.sections){for(const s of v.sections)add(s);offset=0;}
   else {add(v);if(op==='album')title=v.album?.name||title;else if(op==='artist')title=v.artist?.name||title;else if(op==='playlist')title=v.name||title;}
-  return {title,items,links,more,offset};
+  const heartbeatPlaylistId=(op==='liked'||op==='playlist') ? v?.heartbeatPlaylistId : undefined;
+  return {title,items,links,more,offset,heartbeatPlaylistId};
 };
 globalThis.__start=(id,op,args,source)=>{
   __results[id]={pending:true};

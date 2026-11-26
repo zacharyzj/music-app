@@ -20,6 +20,8 @@ pub struct Item {
     pub cover: String,
     pub duration_ms: u64,
     pub unavailable: bool,
+    #[serde(skip_serializing)]
+    pub heartbeat_recommendation: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub downloadable: Option<bool>,
     pub license: String,

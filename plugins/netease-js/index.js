@@ -193,7 +193,7 @@ export async function playlist({ id: value }) {
   const missing = ids.filter((x) => !known.has(x));
   for (const t of await details(missing)) known.set(t.id, t);
   const tracks = ids.length ? ids.map((x) => known.get(x)) : [...known.values()];
-  return { ...info, tracks, trackCount: p.trackCount ?? tracks.length };
+  return { ...info, tracks, trackCount: p.trackCount ?? tracks.length, heartbeatPlaylistId: info.fixed ? info.id : undefined };
 }
 
 async function* userPlaylistPages(uid) {
@@ -230,31 +230,85 @@ async function readLikedOrder(uid) {
     if (!favorite) continue;
     // trackIds 包含全歌单，歌曲详情仅按当前页取。
     const { playlist } = await api("/api/v6/playlist/detail", { id: id(favorite.id), n: 1, s: 0 });
-    if (!Array.isArray(playlist?.trackIds)) break;
+    if (!Array.isArray(playlist?.trackIds)) return { playlistId: favorite.id };
     const ids = playlistTrackIds(playlist, true);
-    if (ids.length >= (playlist.trackCount ?? favorite.trackCount)) return ids;
-    if (!ids.length) break;
-    return [...new Set([...ids, ...await likedIds()])];
+    if (ids.length >= (playlist.trackCount ?? favorite.trackCount)) return { playlistId: favorite.id, ids };
+    if (!ids.length) return { playlistId: favorite.id };
+    return { playlistId: favorite.id, ids: [...new Set([...ids, ...await likedIds()])] };
   }
   return null;
 }
 
-export async function liked({ offset = 0 }) {
-  const start = offsetOf(offset);
+async function likedOrder(refresh = false) {
   const uid = String(requireAccount().id);
-  if (!start || likedPageOrder?.uid !== uid) {
+  if (refresh || likedPageOrder?.uid !== uid) {
     let ordered;
     try { ordered = await readLikedOrder(uid); }
     catch (e) {
       if (!["failed", "unavailable", "unsupported"].includes(e.code)) throw e;
     }
     likedPageOrder = {
-      uid, ids: ordered ?? await likedIds(),
-      title: ordered ? t("喜欢的歌曲") : t("喜欢的歌曲 · 网易云返回顺序"),
+      uid, playlistId: ordered?.playlistId, ids: ordered?.ids ?? await likedIds(),
+      title: ordered?.ids ? t("喜欢的歌曲") : t("喜欢的歌曲 · 网易云返回顺序"),
     };
   }
-  const { ids, title } = likedPageOrder;
-  return { title, tracks: await details(ids.slice(start, start + PAGE)), more: start + PAGE < ids.length };
+  return likedPageOrder;
+}
+
+export async function liked({ offset = 0 }) {
+  const start = offsetOf(offset);
+  const { ids, title, playlistId } = await likedOrder(!start);
+  return { title, tracks: await details(ids.slice(start, start + PAGE)), more: start + PAGE < ids.length, heartbeatPlaylistId: playlistId };
+}
+
+export async function heartbeat({ playlistId, currentId, recent = [] }) {
+  const order = await likedOrder();
+  if (!order.playlistId || order.playlistId !== playlistId) fail("unsupported", "心动模式只适用于当前账号喜欢的歌曲");
+  const liked = new Set(order.ids);
+  if (!liked.size) return { tracks: [] };
+  const played = new Set(recent.slice(-40).map(String));
+  const current = id(currentId);
+  played.add(current);
+  const fresh = [...liked].filter(song => !played.has(song));
+  const seeds = fresh.length ? fresh : order.ids;
+  const seed = liked.has(current) ? current : seeds[Math.floor(Math.random() * seeds.length)];
+  const response = await api("/api/playmode/intelligence/list", {
+    songId: seed, type: "fromPlayOne", playlistId, startMusicId: current, count: 10,
+  });
+
+  const picks = [];
+  const known = new Map();
+  for (const entry of response.data || []) {
+    const song = String(entry?.songInfo?.id ?? entry?.id ?? "");
+    if (!/^[1-9]\d*$/.test(song) || played.has(song) || liked.has(song)) continue;
+    if (entry.songInfo?.name) {
+      const track = model.track(entry.songInfo);
+      if (track.unavailable) continue;
+      known.set(song, track);
+    }
+    played.add(song);
+    picks.push(song);
+    if (picks.length === 5) break;
+  }
+
+  // Sample across the whole favorite playlist, including pages the user has not opened.
+  const pool = !fresh.length && picks.length ? [...liked] : fresh;
+  const favorites = [];
+  while (pool.length && favorites.length < 5) {
+    const i = Math.floor(Math.random() * pool.length);
+    favorites.push(pool[i]);
+    pool[i] = pool[pool.length - 1];
+    pool.pop();
+  }
+  const mixed = [];
+  for (let i = 0; i < Math.max(favorites.length, picks.length); i++) {
+    if (picks[i]) mixed.push(picks[i]);
+    if (favorites[i]) mixed.push(favorites[i]);
+  }
+  for (const track of await details(mixed.filter(song => !known.has(song)))) known.set(track.id, track);
+  const tracks = mixed.map(song => known.get(song)).filter(track => track && !track.unavailable);
+  if (tracks.length && tracks[0].id === (recent[recent.length - 1] || current)) tracks.shift();
+  return { tracks: tracks.map(track => ({ ...track, heartbeatRecommendation: !liked.has(track.id) })) };
 }
 
 export async function isLiked({ ids = [] }) {

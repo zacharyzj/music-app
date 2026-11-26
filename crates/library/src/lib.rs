@@ -62,6 +62,13 @@ impl Library {
         )?;
         Ok(())
     }
+    pub fn has_playlist(&self, id: &str) -> Result<bool> {
+        Ok(self.db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM playlists WHERE id=?1)",
+            [id],
+            |row| row.get(0),
+        )?)
+    }
     pub fn folders(&self) -> Vec<String> {
         serde_json::from_value(self.get("folders")).unwrap_or_default()
     }
@@ -389,11 +396,12 @@ impl Library {
                         title = "喜欢的歌曲".into();
                     }
                     "playlist" => {
-                        let s: String = self.db.query_row(
-                            "SELECT tracks FROM playlists WHERE id=?1",
+                        let (name, s): (String, String) = self.db.query_row(
+                            "SELECT name, tracks FROM playlists WHERE id=?1",
                             [id],
-                            |r| r.get(0),
+                            |r| Ok((r.get(0)?, r.get(1)?)),
                         )?;
+                        title = name;
                         let ids: Vec<String> = serde_json::from_str(&s)?;
                         let all: HashMap<_, _> =
                             tracks.into_iter().map(|v| (v.key.id.clone(), v)).collect();

@@ -102,6 +102,53 @@ fn main() -> Result<()> {
             )?;
             let bytes = std::fs::read("dist/netease.ypm.zip")?;
             let rt = music_plugin_host::Runtime::new();
+            if args.iter().any(|arg| arg == "--heartbeat") {
+                use music_core::{Page, Request};
+                use serde_json::json;
+                let call = |op, args| rt.call(&bytes, scratch.path(), Request::new(op, args));
+                let liked = call("liked", json!({}))?;
+                let playlist = liked["heartbeatPlaylistId"]
+                    .as_str()
+                    .ok_or_else(|| anyhow::anyhow!("Favorite playlist unavailable"))?;
+                let page: Page = serde_json::from_value(liked.clone())?;
+                let mut current = page
+                    .items
+                    .into_iter()
+                    .find(|t| !t.unavailable)
+                    .ok_or_else(|| anyhow::anyhow!("No playable favorite"))?
+                    .key
+                    .id;
+                let mut recent = vec![current.clone()];
+                for batch in 1..=2 {
+                    let page: Page = serde_json::from_value(call(
+                        "heartbeat",
+                        json!({"playlistId":playlist, "currentId":current, "recent":recent}),
+                    )?)?;
+                    let next = page
+                        .items
+                        .first()
+                        .ok_or_else(|| anyhow::anyhow!("Empty heartbeat batch"))?;
+                    let ids: Vec<_> = page.items.iter().map(|t| &t.key.id).collect();
+                    let membership = call("isLiked", json!({"ids":ids}))?;
+                    anyhow::ensure!(
+                        page.items.iter().all(|t| membership[&t.key.id].as_bool()
+                            == Some(!t.heartbeat_recommendation)),
+                        "Recommendation markers disagree with favorite membership"
+                    );
+                    let recommended = page
+                        .items
+                        .iter()
+                        .filter(|t| t.heartbeat_recommendation)
+                        .count();
+                    println!(
+                        "Heartbeat batch {batch}: {} favorites, {recommended} recommendations",
+                        page.items.len() - recommended
+                    );
+                    current = next.key.id.clone();
+                    recent.extend(ids.into_iter().cloned());
+                }
+                return Ok(());
+            }
             let mut failed = false;
             for page in ["daily", "cloud"] {
                 let started = std::time::Instant::now();

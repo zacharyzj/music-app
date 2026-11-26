@@ -1,7 +1,15 @@
 mod covers;
 mod download;
+mod favorites;
+mod heartbeat;
+mod navigation;
 mod preferences;
 mod search;
+#[cfg(all(test, feature = "ui-smoke"))]
+#[path = "../tests/support/mod.rs"]
+mod test_ui;
+#[cfg(not(target_os = "android"))]
+mod tray;
 #[cfg(windows)]
 mod window_behavior;
 mod workers;
@@ -15,7 +23,7 @@ use serde_json::{Value, json};
 use slint::{ComponentHandle, Model, ModelRc, VecModel};
 use std::{
     cell::{Cell, RefCell},
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     rc::Rc,
     sync::{
@@ -62,10 +70,16 @@ struct UiState {
     page_links: Vec<Navigation>,
     page_tabs: Vec<Navigation>,
     items: Vec<Item>,
-    liked: HashSet<ResourceKey>,
+    likes: HashMap<ResourceKey, bool>,
     pending_likes: HashSet<ResourceKey>,
+    // The song shown in the player bar can differ from the queue cursor in heartbeat mode.
+    now_playing: Option<ResourceKey>,
+    checking_current_like: bool,
     next_offset: u64,
     queue: Queue,
+    heartbeat: Option<heartbeat::Heartbeat>,
+    heartbeat_generation: u64,
+    resume_heartbeat: Option<String>,
     last: Request,
     playlists: Vec<Item>,
     lines: Vec<(u64, String)>,
@@ -86,10 +100,49 @@ fn has_capability(plugins: &[(Manifest, bool)], id: &str, cap: &str) -> bool {
 }
 
 impl UiState {
+    fn new(queue: Queue, downloads: download::Downloads, plugins: Vec<(Manifest, bool)>) -> Self {
+        Self {
+            source: "local".into(),
+            page_source: "local".into(),
+            online: None,
+            downloads,
+            sources: vec!["local".into()],
+            plugins,
+            catalog: Vec::new(),
+            nav: local_nav(),
+            page_links: vec![],
+            page_tabs: vec![],
+            items: vec![],
+            likes: HashMap::new(),
+            pending_likes: HashSet::new(),
+            now_playing: None,
+            checking_current_like: false,
+            next_offset: 0,
+            queue,
+            heartbeat: None,
+            heartbeat_generation: 0,
+            resume_heartbeat: None,
+            last: Request::new("library", json!({})),
+            playlists: vec![],
+            lines: vec![],
+            translations: vec![],
+            login_key: String::new(),
+            login_started: None,
+            last_poll: Instant::now(),
+            login_inflight: false,
+            suggest_query: String::new(),
+            playing: false,
+            loaded: None,
+            play_generation: 0,
+        }
+    }
+
     fn clear_page(&mut self, ui: &AppWindow) {
+        self.resume_heartbeat = None;
         self.items.clear();
-        self.liked.clear();
-        self.pending_likes.clear();
+        self.likes.retain(|key, _| {
+            self.now_playing.as_ref() == Some(key) || self.pending_likes.contains(key)
+        });
         self.next_offset = 0;
         self.page_source = self.source.clone();
         self.online = None;
@@ -99,6 +152,7 @@ impl UiState {
         ui.set_page_links(ModelRc::default());
         ui.set_page_tabs(ModelRc::default());
         ui.set_rows(ModelRc::default());
+        ui.set_heartbeat_playlist_id("".into());
         ui.set_page_has_video(false);
         ui.set_more(false);
         ui.set_next_label("加载更多".into());
@@ -130,7 +184,7 @@ impl UiState {
                 result.account_actions = (item.kind == "track" && item.key.source == "local")
                     || (matches!(item.kind.as_str(), "track" | "album")
                         && plugin.is_some_and(Manifest::supports_likes));
-                result.liked = item.kind == "track" && self.liked.contains(&item.key);
+                result.liked = item.kind == "track" && self.is_liked(&item.key);
                 result.like_pending =
                     item.kind == "track" && self.pending_likes.contains(&item.key);
                 if self.online.is_some()
@@ -190,49 +244,6 @@ impl UiState {
         }
     }
 
-    fn request_likes(
-        &self,
-        jobs: &mpsc::Sender<Job>,
-        generation: &AtomicU64,
-        source: &str,
-        items: &[Item],
-    ) {
-        if source != "local"
-            && !self
-                .plugins
-                .iter()
-                .any(|(m, enabled)| *enabled && m.id == source && m.supports_likes())
-        {
-            return;
-        }
-        let ids: Vec<_> = items
-            .iter()
-            .filter(|item| item.kind == "track" && item.key.source == source)
-            .map(|item| &item.key.id)
-            .collect();
-        for batch in ids.chunks(200) {
-            send(jobs, generation, source, "isLiked", json!({"ids":batch}));
-        }
-    }
-
-    fn refresh_hearts(&self, ui: &AppWindow) {
-        let rows = ui.get_rows();
-        for (i, item) in self.items.iter().enumerate() {
-            if item.kind != "track" {
-                continue;
-            }
-            let liked = self.liked.contains(&item.key);
-            let pending = self.pending_likes.contains(&item.key);
-            if let Some(mut row) = rows.row_data(i)
-                && (row.liked != liked || row.like_pending != pending)
-            {
-                row.liked = liked;
-                row.like_pending = pending;
-                rows.set_row_data(i, row);
-            }
-        }
-    }
-
     fn remove_visible_track(&mut self, ui: &AppWindow, key: &ResourceKey) {
         if let Some(i) = self.items.iter().position(|item| item.key == *key) {
             self.items.remove(i);
@@ -246,14 +257,10 @@ impl UiState {
         }
     }
 
-    fn finish_row_edit(&mut self, ui: &AppWindow, reply: Reply) {
-        let favorite = reply.op == "like";
+    fn finish_playlist_edit(&mut self, ui: &AppWindow, reply: Reply) {
         let key = ResourceKey {
             source: reply.source,
-            id: reply.args[if favorite { "id" } else { "track" }]
-                .as_str()
-                .unwrap_or_default()
-                .to_owned(),
+            id: reply.args["track"].as_str().unwrap_or_default().to_owned(),
         };
         let title = self
             .items
@@ -261,23 +268,8 @@ impl UiState {
             .find(|item| item.key == key)
             .map(|item| format!("《{}》", item.title))
             .unwrap_or_else(|| "这首歌".into());
-        if favorite {
-            self.pending_likes.remove(&key);
-        }
         let message = match reply.value {
             Err(e) => format!("{title}操作失败 · {e}"),
-            Ok(_) if favorite => {
-                if reply.args["on"] == true {
-                    self.liked.insert(key);
-                    format!("已喜欢{title}")
-                } else {
-                    self.liked.remove(&key);
-                    if self.last.op == "liked" {
-                        self.remove_visible_track(ui, &key);
-                    }
-                    format!("已取消喜欢{title}")
-                }
-            }
             Ok(changed) => {
                 let name = self
                     .playlists
@@ -297,9 +289,6 @@ impl UiState {
                 }
             }
         };
-        if favorite {
-            self.refresh_hearts(ui);
-        }
         ui.invoke_notify_row(message.into());
     }
 
@@ -386,6 +375,7 @@ fn row(t: &Item, plugins: &[(Manifest, bool)]) -> Row {
             slint::Image::default()
         },
         disabled: t.unavailable,
+        recommended: t.heartbeat_recommendation,
         show_video: t.kind == "track" && has_capability(plugins, &t.key.source, "video"),
         show_download: false,
         account_actions: true,
@@ -553,6 +543,7 @@ fn play(
     video: bool,
 ) {
     state.play_generation += 1;
+    state.heartbeat_track(&item);
     let mut args = json!({"id":item.key.id});
     if video {
         args["video"] = json!(true);
@@ -562,6 +553,7 @@ fn play(
     }
     state.loaded = None;
     if player.send(Command::Stop).is_err() {
+        state.stop_heartbeat(ui);
         ui.set_status("播放引擎不可用，请检查 libmpv 路径后重启".into());
         ui.set_playing(false);
         return;
@@ -569,6 +561,10 @@ fn play(
     state.playing = false;
     ui.set_playing(false);
     ui.set_now_title(item.title.clone().into());
+    if state.now_playing.as_ref() != Some(&item.key) {
+        state.now_playing = Some(item.key.clone());
+        state.checking_current_like = false;
+    }
     ui.set_now_artist(item.subtitle.clone().into());
     ui.set_now_cover(row(&item, &state.plugins).cover);
     ui.set_lyric("".into());
@@ -582,6 +578,8 @@ fn play(
         request: Request::new("resolve", args),
         generation: state.play_generation,
     });
+    state.request_heartbeat(tx);
+    state.request_current_like(ui, tx);
 }
 fn plugin_list(dir: &Path, db: &Library) -> Vec<(Manifest, bool)> {
     std::fs::read_dir(dir)
@@ -613,6 +611,9 @@ pub fn run_at(root: PathBuf) -> Result<()> {
     #[cfg(windows)]
     window_behavior::install(&ui);
     let library = Library::open(&root)?;
+    let location = navigation::Location::read(&library);
+    #[cfg(not(target_os = "android"))]
+    tray::install(&ui, &library, root.clone());
     let initial = PlaybackSettings::read(&library);
     let preferences = Rc::new(Cell::new(initial));
     let saved_preferences = Rc::new(Cell::new(initial));
@@ -626,35 +627,11 @@ pub fn run_at(root: PathBuf) -> Result<()> {
     let plugin_dir = root.join("plugins");
     std::fs::create_dir_all(&plugin_dir)?;
     let plugins = plugin_list(&plugin_dir, &library);
-    let state = Rc::new(RefCell::new(UiState {
-        source: "local".into(),
-        page_source: "local".into(),
-        online: None,
-        downloads: download::Downloads::restore(library.get("download-queue")),
-        sources: vec!["local".into()],
+    let state = Rc::new(RefCell::new(UiState::new(
+        restored,
+        download::Downloads::restore(library.get("download-queue")),
         plugins,
-        catalog: Vec::new(),
-        nav: local_nav(),
-        page_links: vec![],
-        page_tabs: vec![],
-        items: vec![],
-        liked: HashSet::new(),
-        pending_likes: HashSet::new(),
-        next_offset: 0,
-        queue: restored,
-        last: Request::new("library", json!({})),
-        playlists: vec![],
-        lines: vec![],
-        translations: vec![],
-        login_key: String::new(),
-        login_started: None,
-        last_poll: Instant::now(),
-        login_inflight: false,
-        suggest_query: String::new(),
-        playing: false,
-        loaded: None,
-        play_generation: 0,
-    }));
+    )));
     let (tx, rx) = mpsc::channel::<Job>();
     let (out_tx, out_rx) = mpsc::channel::<Reply>();
     let generation = Arc::new(AtomicU64::new(1));
@@ -684,7 +661,11 @@ pub fn run_at(root: PathBuf) -> Result<()> {
     {
         let mut s = state.borrow_mut();
         update_plugins(&ui, &mut s);
-        show_nav(&ui, &s);
+        let source = location
+            .as_ref()
+            .map_or("local", |l| l.source.as_str())
+            .to_owned();
+        s.open_source(&ui, &tx, &generation, &source, location);
         refresh_queue(&ui, &s);
         s.schedule_downloads(&ui, &tx, &generation);
     }
@@ -698,52 +679,7 @@ pub fn run_at(root: PathBuf) -> Result<()> {
         let Some(source) = s.sources.get(index as usize).cloned() else {
             return;
         };
-        genr.fetch_add(1, Ordering::Relaxed);
-        if s.login_started.is_some() {
-            send(&job, &genr, &s.source, "loginCancel", json!({}));
-        }
-        s.login_started = None;
-        s.login_key.clear();
-        s.login_inflight = false;
-        ui.set_show_login(false);
-        s.source = source.clone();
-        s.clear_page(&ui);
-        let anonymous = has_capability(&s.plugins, &source, "anonymous");
-        ui.set_anonymous_source(anonymous);
-        ui.set_has_quality_setting(s.plugins.iter().any(|(m, on)| {
-            *on && m.id == source && m.settings.iter().any(|setting| setting.key == "quality")
-        }));
-        ui.set_nav_index(0);
-        s.page_tabs.clear();
-        s.suggest_query.clear();
-        ui.set_suggestions(ModelRc::default());
-        ui.set_account_name("登录".into());
-        s.nav = if source == "local" {
-            local_nav()
-        } else {
-            s.plugins
-                .iter()
-                .find(|(m, _)| m.id == source)
-                .map(|(m, _)| m.navigation.clone())
-                .unwrap_or_default()
-        };
-        show_nav(&ui, &s);
-        s.last = Request::new(
-            if source == "local" { "library" } else { "home" },
-            json!({}),
-        );
-        ui.set_busy(true);
-        send(&job, &genr, &source, &s.last.op, s.last.args.clone());
-        if source != "local" && !anonymous {
-            send(&job, &genr, &source, "account", json!({}));
-            if s.plugins
-                .iter()
-                .any(|(m, _)| m.id == source && m.capabilities.iter().any(|c| c == "settings"))
-            {
-                send(&job, &genr, &source, "settings", json!({}));
-            }
-        }
-        ui.set_show_settings(false);
+        s.open_source(&ui, &job, &genr, &source, None);
     });
     let weak = ui.as_weak();
     let st = state.clone();
@@ -837,6 +773,11 @@ pub fn run_at(root: PathBuf) -> Result<()> {
                     {
                         return;
                     }
+                    if !video && s.on_heartbeat_page(&ui) {
+                        s.start_heartbeat(&ui, &job, &pc, Some(&item.key));
+                        return;
+                    }
+                    s.stop_heartbeat(&ui);
                     s.queue.items = s
                         .items
                         .iter()
@@ -877,6 +818,9 @@ pub fn run_at(root: PathBuf) -> Result<()> {
                         );
                     } else {
                         ui.invoke_notify_row(format!("《{}》已加入播放队列", item.title).into());
+                        if !s.on_heartbeat_page(&ui) {
+                            s.stop_heartbeat(&ui);
+                        }
                         s.queue.items.push(item);
                         refresh_queue(&ui, &s);
                     }
@@ -899,17 +843,8 @@ pub fn run_at(root: PathBuf) -> Result<()> {
                         json!({"id":item.key.id,"on":action=="like"}),
                     );
                 }
-                "like" | "unlike"
-                    if item.kind == "track" && s.pending_likes.insert(item.key.clone()) =>
-                {
-                    s.refresh_hearts(&ui);
-                    send(
-                        &job,
-                        &genr,
-                        &item.key.source,
-                        "like",
-                        json!({"id":item.key.id,"on":action=="like"}),
-                    );
+                "like" | "unlike" if item.kind == "track" => {
+                    s.set_track_liked(&ui, &job, &item.key, action == "like");
                 }
                 _ => {}
             }
@@ -924,13 +859,22 @@ pub fn run_at(root: PathBuf) -> Result<()> {
             let mut s = st.borrow_mut();
             if a == "remove" {
                 if s.queue.index == Some(i as usize) {
+                    s.cancel_heartbeat_advance();
                     let _ = pc.send(Command::Stop);
                     s.play_generation += 1;
                     s.loaded = None;
                     s.playing = false;
                     ui.set_playing(false);
+                    s.clear_now_playing(&ui);
                 }
                 s.queue.remove(i as usize);
+                if s.heartbeat.is_some() && s.queue.items.is_empty() {
+                    s.stop_heartbeat(&ui);
+                    s.queue.items.clear();
+                    s.queue.index = None;
+                } else {
+                    s.request_heartbeat(&job);
+                }
                 refresh_queue(&ui, &s);
             } else if matches!(a.as_str(), "play" | "video")
                 && let Some(t) = s.queue.items.get(i as usize).cloned()
@@ -978,6 +922,7 @@ pub fn run_at(root: PathBuf) -> Result<()> {
         let mut s = st.borrow_mut();
         match a.as_str() {
             "pause" => {
+                s.cancel_heartbeat_advance();
                 if s.loaded.is_none() {
                     if let Some(t) = s
                         .queue
@@ -999,22 +944,29 @@ pub fn run_at(root: PathBuf) -> Result<()> {
                     s.queue.index = Some(i);
                     s.queue.items.get(i).cloned()
                 } else {
-                    s.queue.advance(false, rand::random())
+                    s.advance_track(false, &job)
                 };
                 if let Some(t) = item {
                     play(&ui, &mut s, &job, &pc, t, false);
                 }
             }
             "cycle-mode" | "shuffle" => {
-                if a == "shuffle" {
-                    s.queue.toggle_shuffle();
-                } else {
-                    s.queue.cycle_playback_mode();
-                }
-                ui.set_playback_mode(s.queue.playback_mode().into());
-                ui.set_status(ui.get_playback_mode_name());
+                s.change_playback_mode(&ui, &job, &pc, a == "shuffle");
             }
+            "favorite-current" => s.toggle_current_favorite(&ui, &job),
             "play-all" => {
+                if s.on_heartbeat_page(&ui) {
+                    let seed = s
+                        .items
+                        .iter()
+                        .find(|t| t.kind == "track" && !t.unavailable)
+                        .map(|t| t.key.clone());
+                    if let Some(seed) = seed {
+                        s.start_heartbeat(&ui, &job, &pc, Some(&seed));
+                    }
+                    return;
+                }
+                s.stop_heartbeat(&ui);
                 s.queue.items = s
                     .items
                     .iter()
@@ -1089,6 +1041,9 @@ pub fn run_at(root: PathBuf) -> Result<()> {
                 }
             }
             "login" => {
+                if s.source == "netease" {
+                    s.stop_heartbeat(&ui);
+                }
                 s.login_started = Some(Instant::now());
                 s.login_key.clear();
                 s.login_inflight = true;
@@ -1104,6 +1059,10 @@ pub fn run_at(root: PathBuf) -> Result<()> {
                 send(&job, &genr, &s.source, "loginCancel", json!({}));
             }
             "logout" => {
+                if s.source == "netease" {
+                    s.stop_heartbeat(&ui);
+                    ui.set_heartbeat_playlist_id("".into());
+                }
                 s.login_started = None;
                 s.login_key.clear();
                 send(&job, &genr, &s.source, "signOut", json!({}));
@@ -1158,17 +1117,24 @@ pub fn run_at(root: PathBuf) -> Result<()> {
         if let Some(ui) = weak.upgrade() {
             let mut s = st.borrow_mut();
             if let Some((m, _)) = s.plugins.get(i as usize).cloned() {
+                if m.id == "netease" {
+                    s.stop_heartbeat(&ui);
+                    ui.set_heartbeat_playlist_id("".into());
+                }
                 genr.fetch_add(1, Ordering::Relaxed);
-                if s.queue
-                    .index
-                    .and_then(|i| s.queue.items.get(i))
-                    .is_some_and(|t| t.key.source == m.id)
+                s.forget_source_likes(&m.id);
+                if s.now_playing.as_ref().is_some_and(|key| key.source == m.id)
+                    || s.queue
+                        .index
+                        .and_then(|i| s.queue.items.get(i))
+                        .is_some_and(|t| t.key.source == m.id)
                 {
                     s.play_generation += 1;
                     s.loaded = None;
                     s.playing = false;
                     let _ = pc.send(Command::Stop);
                     ui.set_playing(false);
+                    s.clear_now_playing(&ui);
                 }
                 send(&job, &genr, "local", a.as_str(), json!({"id":m.id}));
             }
@@ -1321,6 +1287,7 @@ pub fn run_at(root: PathBuf) -> Result<()> {
     #[cfg(feature = "ui-smoke")]
     let mut capture_download = std::env::var_os("MUSIC_API_CAPTURE_DOWNLOAD").is_some();
     let mut saved = Instant::now();
+    let mut last_location = Value::Null;
     let mut catalog_file: Option<tempfile::NamedTempFile> = None;
     let settings = preferences.clone();
     let last_written = saved_preferences.clone();
@@ -1367,6 +1334,17 @@ pub fn run_at(root: PathBuf) -> Result<()> {
                 }
             }
             while let Ok(reply) = out_rx.try_recv() {
+                if reply.op == "heartbeat" {
+                    s.finish_heartbeat(
+                        &ui,
+                        reply,
+                        &job,
+                        &pc,
+                        &cover_tx,
+                        genr.load(Ordering::Relaxed),
+                    );
+                    continue;
+                }
                 if reply.op == "install" && reply.args["online"] == true {
                     drop(catalog_file.take());
                     ui.set_catalog_busy(false);
@@ -1409,12 +1387,25 @@ pub fn run_at(root: PathBuf) -> Result<()> {
                     }
                     continue;
                 }
+                if reply.op == "like" {
+                    s.finish_like(&ui, reply, &job, &genr);
+                    continue;
+                }
+                if reply.op == "isLiked" {
+                    if reply.generation == favorites::TRACK_SCOPE
+                        || reply.generation == genr.load(Ordering::Relaxed)
+                    {
+                        s.finish_like_query(&ui, reply);
+                    }
+                    continue;
+                }
                 if (["resolve", "lyrics"].contains(&reply.op.as_str())
                     && reply.generation != s.play_generation)
                     || (!["resolve", "lyrics"].contains(&reply.op.as_str())
                         && reply.generation != genr.load(Ordering::Relaxed))
                         && ![
                             "plugins",
+                            "signOut",
                             "install",
                             "toggle",
                             "remove",
@@ -1426,34 +1417,8 @@ pub fn run_at(root: PathBuf) -> Result<()> {
                 {
                     continue;
                 }
-                if matches!(
-                    reply.op.as_str(),
-                    "like" | "addToPlaylist" | "removeFromPlaylist"
-                ) {
-                    s.finish_row_edit(&ui, reply);
-                    continue;
-                }
-                if reply.op == "isLiked" {
-                    if let Ok(Value::Object(states)) = reply.value {
-                        for (id, value) in states {
-                            let key = ResourceKey {
-                                source: reply.source.clone(),
-                                id,
-                            };
-                            if !s.pending_likes.contains(&key) {
-                                match value.as_bool() {
-                                    Some(true) => {
-                                        s.liked.insert(key);
-                                    }
-                                    Some(false) => {
-                                        s.liked.remove(&key);
-                                    }
-                                    None => {}
-                                }
-                            }
-                        }
-                        s.refresh_hearts(&ui);
-                    }
+                if matches!(reply.op.as_str(), "addToPlaylist" | "removeFromPlaylist") {
+                    s.finish_playlist_edit(&ui, reply);
                     continue;
                 }
                 if reply.op == "saveAlbum" {
@@ -1506,9 +1471,21 @@ pub fn run_at(root: PathBuf) -> Result<()> {
                 if reply.op == "persist" {
                     continue;
                 }
-                if s.online
-                    .as_ref()
-                    .is_none_or(|search| search.pending(false) == 0 || !s.items.is_empty())
+                let background = matches!(
+                    reply.op.as_str(),
+                    "scan" | "local-playlists" | "account" | "settings" | "suggest"
+                ) && !ui.get_show_settings()
+                    && !ui.get_show_login();
+                if background
+                    && reply.value.is_err()
+                    && matches!(reply.op.as_str(), "account" | "settings" | "suggest")
+                {
+                    continue;
+                }
+                if !background
+                    && s.online
+                        .as_ref()
+                        .is_none_or(|search| search.pending(false) == 0 || !s.items.is_empty())
                 {
                     ui.set_busy(false);
                 }
@@ -1526,6 +1503,9 @@ pub fn run_at(root: PathBuf) -> Result<()> {
                         if reply.op == "resolve" {
                             s.playing = false;
                             ui.set_playing(false);
+                            if s.skip_failed_heartbeat_track(&ui, &job, &pc) {
+                                continue;
+                            }
                         }
                         if ui.get_show_login() {
                             ui.set_login_message(e.into());
@@ -1535,6 +1515,7 @@ pub fn run_at(root: PathBuf) -> Result<()> {
                         "resolve" => {
                             ui.set_has_error(false);
                             if let Some(url) = v["url"].as_str() {
+                                s.heartbeat_resolved();
                                 let _ = pc.send(Command::Open {
                                     url: url.into(),
                                     referrer: v["referrer"].as_str().map(str::to_owned),
@@ -1599,7 +1580,12 @@ pub fn run_at(root: PathBuf) -> Result<()> {
                             ui.set_account_name(v["name"].as_str().unwrap_or("登录").into());
                         }
                         "signOut" => {
-                            s.liked.retain(|key| key.source != reply.source);
+                            if reply.source == "netease" {
+                                s.stop_heartbeat(&ui);
+                                ui.set_heartbeat_playlist_id("".into());
+                            }
+                            s.forget_source_likes(&reply.source);
+                            s.request_current_like(&ui, &job);
                             if s.last.op == "liked" && s.page_source == reply.source {
                                 s.items.clear();
                                 s.update_rows(&ui);
@@ -1647,6 +1633,8 @@ pub fn run_at(root: PathBuf) -> Result<()> {
                                         ui.set_login_message("已扫码，请在手机确认".into())
                                     }
                                     Some("success") => {
+                                        s.forget_source_likes(&reply.source);
+                                        s.request_current_like(&ui, &job);
                                         s.login_started = None;
                                         s.login_key.clear();
                                         ui.set_show_login(false);
@@ -1664,7 +1652,12 @@ pub fn run_at(root: PathBuf) -> Result<()> {
                         "plugins" => {
                             let old_source = s.source.clone();
                             s.plugins = serde_json::from_value(v).unwrap_or_default();
+                            if !has_capability(&s.plugins, "netease", "heartbeat") {
+                                s.stop_heartbeat(&ui);
+                                ui.set_heartbeat_playlist_id("".into());
+                            }
                             update_plugins(&ui, &mut s);
+                            s.request_current_like(&ui, &job);
                             refresh_queue(&ui, &s);
                             s.update_rows(&ui);
                             if s.online.is_some() && s.last.op == "search" && s.source == old_source
@@ -1676,16 +1669,9 @@ pub fn run_at(root: PathBuf) -> Result<()> {
                                     send(&job, &genr, &s.source, "search", s.last.args.clone());
                                 }
                             }
-                            if s.source != old_source {
-                                genr.fetch_add(1, Ordering::Relaxed);
-                                s.clear_page(&ui);
-                                ui.set_anonymous_source(false);
-                                s.last = Request::new("library", json!({}));
-                                s.login_started = None;
-                                s.login_key.clear();
-                                ui.set_show_login(false);
-                                ui.set_account_name("登录".into());
-                                send(&job, &genr, "local", "library", json!({}));
+                            if s.source != old_source || !s.sources.contains(&s.page_source) {
+                                let source = s.source.clone();
+                                s.open_source(&ui, &job, &genr, &source, None);
                             }
                         }
                         "install" | "toggle" | "remove" => {
@@ -1693,11 +1679,13 @@ pub fn run_at(root: PathBuf) -> Result<()> {
                             ui.set_status("插件已更新".into());
                         }
                         "scan" => {
-                            ui.set_status(if v.as_array().is_some_and(|v| v.is_empty()) {
-                                "扫描完成".into()
-                            } else {
-                                v.to_string().into()
-                            });
+                            if ui.get_show_settings() {
+                                ui.set_status(if v.as_array().is_some_and(|v| v.is_empty()) {
+                                    "扫描完成".into()
+                                } else {
+                                    v.to_string().into()
+                                });
+                            }
                             if s.online.is_none()
                                 && s.page_source == "local"
                                 && matches!(s.last.op.as_str(), "library" | "search")
@@ -1723,6 +1711,7 @@ pub fn run_at(root: PathBuf) -> Result<()> {
                             let mut links: Vec<Navigation> =
                                 serde_json::from_value(v["links"].clone()).unwrap_or_default();
                             links.retain(|n| n.op == "browse");
+                            let heartbeat_id = v["heartbeatPlaylistId"].clone();
                             if let Ok(mut page) = serde_json::from_value::<Page>(v) {
                                 if reply.source != s.page_source
                                     || (page.offset > 0
@@ -1732,6 +1721,19 @@ pub fn run_at(root: PathBuf) -> Result<()> {
                                     continue;
                                 }
                                 s.last = Request::new(&reply.op, reply.args.clone());
+                                ui.set_heartbeat_playlist_id(
+                                    if has_capability(&s.plugins, &reply.source, "heartbeat") {
+                                        heartbeat::playlist_id(
+                                            &reply.source,
+                                            &s.last,
+                                            &heartbeat_id,
+                                        )
+                                        .unwrap_or_default()
+                                        .into()
+                                    } else {
+                                        "".into()
+                                    },
+                                );
                                 let local_miss = reply.source == "local"
                                     && reply.op == "search"
                                     && page.offset == 0
@@ -1773,12 +1775,13 @@ pub fn run_at(root: PathBuf) -> Result<()> {
                                 );
                                 ui.set_heading(page.title.into());
                                 if reply.op == "liked" {
-                                    s.liked.extend(
+                                    s.likes.extend(
                                         page.items
                                             .iter()
                                             .filter(|t| t.kind == "track")
-                                            .map(|t| t.key.clone()),
+                                            .map(|t| (t.key.clone(), true)),
                                     );
+                                    ui.set_current_favorite(s.current_favorite());
                                 } else {
                                     s.request_likes(&job, &genr, &reply.source, &page.items);
                                 }
@@ -1793,6 +1796,11 @@ pub fn run_at(root: PathBuf) -> Result<()> {
                                     s.items = page.items;
                                 }
                                 s.update_rows(&ui);
+                                if let Some(id) = s.resume_heartbeat.take()
+                                    && id == ui.get_heartbeat_playlist_id().as_str()
+                                {
+                                    s.start_heartbeat(&ui, &job, &pc, None);
+                                }
                                 let status = if local_miss {
                                     "本地未找到匹配内容，可在设置中安装并启用在线音乐源".to_owned()
                                 } else {
@@ -1942,7 +1950,7 @@ pub fn run_at(root: PathBuf) -> Result<()> {
                         s.loaded = None;
                         s.playing = false;
                         ui.set_playing(false);
-                        if let Some(t) = s.queue.advance(true, rand::random()) {
+                        if let Some(t) = s.advance_track(true, &job) {
                             play(&ui, &mut s, &job, &pc, t, false);
                         }
                     }
@@ -1978,17 +1986,23 @@ pub fn run_at(root: PathBuf) -> Result<()> {
             }
             if saved.elapsed() > Duration::from_secs(3) {
                 saved = Instant::now();
+                let location = json!(navigation::Location::capture(&ui, &s));
+                if location != last_location
+                    && let Ok(db) = library.try_lock()
+                    && db.set(navigation::KEY, location.clone()).is_ok()
+                {
+                    last_location = location;
+                }
                 send(
                     &job,
                     &genr,
                     "local",
                     "persist",
-                    json!({"queue":s.queue,"dark":ui.get_dark()}),
+                    json!({"queue":s.saved_queue(),"dark":ui.get_dark()}),
                 );
             }
         },
     );
-    send(&tx, &generation, "local", "library", json!({}));
     send(&tx, &generation, "local", "local-playlists", json!({}));
     send(&tx, &generation, "local", "scan", json!({}));
     #[cfg(feature = "ui-smoke")]
@@ -2168,7 +2182,11 @@ pub fn run_at(root: PathBuf) -> Result<()> {
     preferences
         .get()
         .save_changes(&shutdown_db, &saved_preferences)?;
-    shutdown_db.set("queue", json!(s.queue))?;
+    shutdown_db.set(
+        navigation::KEY,
+        json!(navigation::Location::capture(&ui, &s)),
+    )?;
+    shutdown_db.set("queue", json!(s.saved_queue()))?;
     shutdown_db.set("download-queue", s.downloads.snapshot())?;
     send(
         &tx,
@@ -2183,7 +2201,7 @@ pub fn run_at(root: PathBuf) -> Result<()> {
         &generation,
         "local",
         "persist",
-        json!({"queue":s.queue,"dark":ui.get_dark()}),
+        json!({"queue":s.saved_queue(),"dark":ui.get_dark()}),
     );
     let _ = ptx.send(Command::Quit);
     Ok(())

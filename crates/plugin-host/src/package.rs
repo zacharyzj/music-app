@@ -142,7 +142,12 @@ impl Package {
                 caps.extend(strings(&raw["capabilities"]).into_iter().filter(|c| {
                     matches!(
                         c.as_str(),
-                        "download" | "anonymous" | "tracksOnly" | "readOnly" | "video"
+                        "download"
+                            | "anonymous"
+                            | "tracksOnly"
+                            | "readOnly"
+                            | "video"
+                            | "heartbeat"
                     )
                 }));
                 caps

@@ -1,5 +1,5 @@
 mod support;
-use music_app_ui::{AppWindow, PlayerMode, Row};
+use music_app_ui::{AppWindow, FavoriteState, PlayerMode, Row};
 use slint::platform::{Key, PointerEventButton, WindowEvent};
 use slint::{
     ComponentHandle, LogicalPosition, ModelRc, PhysicalSize, PlatformError, SharedString, Window,
@@ -105,39 +105,78 @@ fn shortcuts_clicks_and_tooltips_in_the_player_window() -> anyhow::Result<()> {
     }
 
     let mut mode_icons = Vec::new();
+    ui.set_current_favorite(FavoriteState::Liked);
     for (mode, name) in [
         (PlayerMode::Sequential, "顺序播放"),
         (PlayerMode::RepeatAll, "列表循环"),
         (PlayerMode::RepeatOne, "单曲循环"),
         (PlayerMode::Shuffle, "随机播放"),
+        (PlayerMode::Heartbeat, "心动模式"),
     ] {
         ui.set_playback_mode(mode);
         assert_eq!(ui.get_playback_mode_name(), name);
         let frame = window.take_snapshot()?;
         let stride = frame.width() as usize;
-        let background = frame.as_slice()[415 * stride + 247];
-        let icon: Vec<bool> = frame
-            .as_slice()
-            .chunks_exact(stride)
-            .skip(406)
-            .take(18)
-            .flat_map(|row| row[264..282].iter().map(|&pixel| pixel != background))
-            .collect();
+        let background = frame.as_slice()[415 * stride + 228];
+        let shape = |left| -> Vec<bool> {
+            frame
+                .as_slice()
+                .chunks_exact(stride)
+                .skip(406)
+                .take(18)
+                .flat_map(|row| {
+                    row[left..left + 18]
+                        .iter()
+                        .map(|&pixel| pixel != background)
+                })
+                .collect()
+        };
+        let icon = shape(242);
         assert!(
             icon.iter().any(|&ink| ink) && !mode_icons.contains(&icon),
             "missing or duplicate icon for {name}"
         );
         mode_icons.push(icon);
+        if mode == PlayerMode::Heartbeat {
+            assert_ne!(
+                shape(242),
+                shape(424),
+                "heartbeat and the favorite heart must have distinct shapes"
+            );
+        }
     }
     ui.set_playback_mode(PlayerMode::Sequential);
-    click(window, 273., 415.);
+    click(window, 251., 415.);
     assert_eq!(actions.take(), ["cycle-mode"]);
+    for state in [
+        FavoriteState::NoTrack,
+        FavoriteState::Unsupported,
+        FavoriteState::Checking,
+        FavoriteState::Adding,
+        FavoriteState::Removing,
+    ] {
+        ui.set_current_favorite(state);
+        click(window, 433., 415.);
+        chord(window, Some(Key::Control), "d", false);
+        assert!(actions.take().is_empty());
+    }
+    for state in [
+        FavoriteState::Unliked,
+        FavoriteState::Liked,
+        FavoriteState::Retry,
+    ] {
+        ui.set_current_favorite(state);
+        click(window, 433., 415.);
+        chord(window, Some(Key::Control), "d", true);
+        assert_eq!(actions.take(), ["favorite-current", "favorite-current"]);
+    }
+    ui.set_current_favorite(FavoriteState::Unliked);
 
     ui.set_show_downloads(true);
     chord(window, Some(Key::Control), "p", true);
     assert!(ui.get_show_queue() && !ui.get_show_downloads());
     window.take_snapshot()?;
-    click(window, 455., 415.);
+    click(window, 477., 415.);
     assert!(
         !ui.get_show_queue(),
         "the queue icon must close the same panel"
@@ -213,11 +252,12 @@ fn shortcuts_clicks_and_tooltips_in_the_player_window() -> anyhow::Result<()> {
         }
         // Real hit targets in the smallest supported layout, including both sliders.
         for (name, x, y) in [
-            ("mode", 273., 415.),
-            ("previous", 317., 415.),
-            ("play", 364., 415.),
-            ("next", 411., 415.),
-            ("queue", 455., 415.),
+            ("mode", 251., 415.),
+            ("previous", 295., 415.),
+            ("play", 342., 415.),
+            ("next", 389., 415.),
+            ("favorite", 433., 415.),
+            ("queue", 477., 415.),
             ("lyrics", 590., 431.),
             ("mute", 630., 431.),
             ("volume", 695., 431.),
@@ -270,11 +310,12 @@ fn shortcuts_clicks_and_tooltips_in_the_player_window() -> anyhow::Result<()> {
     }
     chord(window, Some(Key::Control), Key::RightArrow, false);
     chord(window, Some(Key::Control), "p", false);
+    chord(window, Some(Key::Control), "d", false);
     chord(window, None, Key::Return, false);
     assert_eq!(query.borrow().as_str(), "a b");
     assert!(!ui.get_show_queue() && actions.borrow().is_empty());
 
-    click(window, 411., 415.);
+    click(window, 389., 415.);
     assert_eq!(actions.take(), ["next"]);
     chord(window, None, Key::Space, false);
     assert_eq!(
