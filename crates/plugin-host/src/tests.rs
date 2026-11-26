@@ -303,6 +303,26 @@ fn rejects_zip_traversal_and_duplicate_manifest() {
     assert!(Package::read(&zip.finish().unwrap().into_inner()).is_err());
 }
 
+fn start_qr_login(s: &mut Session) -> Value {
+    s.eval::<()>("let qrClock=Date.now(); Date.now=()=>qrClock;")
+        .unwrap();
+    s.call(Request::new("loginStart", json!({}))).unwrap()
+}
+
+fn poll_qr_after(s: &mut Session, start: &Value, millis: u32) -> Result<Value> {
+    // Let the previous poll register its timer before moving the fixture clock.
+    while s.engine.is_job_pending() {
+        s.pump()?;
+    }
+    s.eval::<()>(&format!("qrClock += {millis}"))?;
+    loop {
+        let state = s.call(Request::new("loginPoll", json!({"key":start["key"]})))?;
+        if state["status"] != "waiting" || !s.engine.is_job_pending() {
+            return Ok(state);
+        }
+    }
+}
+
 #[test]
 fn upstream_login_rotates_qr_and_commits_verified_account() {
     let dir = tempfile::tempdir().unwrap();
@@ -312,19 +332,13 @@ fn upstream_login_rotates_qr_and_commits_verified_account() {
         "login/qrcode/client/login":{"responses":[{"code":802},{"code":800},{"code":803,"_cookies":["MUSIC_U=verified; Path=/; HttpOnly"]}]},
         "w/nuser/account/get":{"code":200,"profile":{"userId":42,"nickname":"fixture-account"}}
     }));
-    s.eval::<()>("const realNow=Date.now;let advance=0;Date.now=()=>realNow()+advance;")
-        .unwrap();
-    let start = s.call(Request::new("loginStart", json!({}))).unwrap();
-    let args = json!({"key":start["key"]});
-    s.eval::<()>("advance+=2000").unwrap();
-    let waiting = s.call(Request::new("loginPoll", args.clone())).unwrap();
+    let start = start_qr_login(&mut s);
+    let waiting = poll_qr_after(&mut s, &start, 2000).unwrap();
     assert_eq!(waiting["status"], "waiting");
     assert!(waiting["message"].as_str().unwrap().contains("已扫码"));
-    s.eval::<()>("advance+=2000").unwrap();
-    let rotated = s.call(Request::new("loginPoll", args.clone())).unwrap();
+    let rotated = poll_qr_after(&mut s, &start, 2000).unwrap();
     assert!(rotated["qr"].as_str().unwrap().contains("second-key"));
-    s.eval::<()>("advance+=2000").unwrap();
-    let success = s.call(Request::new("loginPoll", args)).unwrap();
+    let success = poll_qr_after(&mut s, &start, 2000).unwrap();
     assert_eq!(success["status"], "success");
     assert_eq!(success["account"]["id"], "42");
     assert_eq!(
@@ -652,15 +666,10 @@ fn bilibili_qr_verifies_before_saving_and_supports_sign_out() {
         (format!("{passport}poll?qrcode_key=second")):{"code":0,"_cookies":["SESSDATA=verified; Path=/; HttpOnly","other=skip; Path=/"],"data":{"code":0}},
         (nav):{"_expectCookie":"SESSDATA=verified","code":0,"data":{"isLogin":true,"mid":37,"uname":"B站测试"}}
     }));
-    s.eval::<()>("const now=Date.now;let t=0;Date.now=()=>now()+t")
-        .unwrap();
-    let start = s.call(Request::new("loginStart", json!({}))).unwrap();
-    assert!(start["qr"].as_str().unwrap().ends_with("/first"));
-    let mut poll = || -> Value {
-        s.eval::<()>("t+=2100").unwrap();
-        s.call(Request::new("loginPoll", json!({"key":start["key"]})))
-            .unwrap()
-    };
+    let start = start_qr_login(&mut s);
+    let initial = poll_qr_after(&mut s, &start, 0).unwrap();
+    assert!(initial["qr"].as_str().unwrap().ends_with("/first"));
+    let mut poll = || poll_qr_after(&mut s, &start, 2100).unwrap();
     assert!(poll()["message"].as_str().unwrap().contains("扫码"));
     assert!(poll()["message"].as_str().unwrap().contains("已扫码"));
     assert!(poll()["qr"].as_str().unwrap().ends_with("/second"));
@@ -698,12 +707,9 @@ fn bilibili_failed_relogin_preserves_previous_session() {
         "https://passport.bilibili.com/x/passport-login/web/qrcode/poll?qrcode_key=new":{"code":0,"data":{"code":0,"url":"https://passport.biligame.com/crossDomain?SESSDATA=unverified&ignored=ignore"}},
         "https://api.bilibili.com/x/web-interface/nav":{"_expectCookie":"SESSDATA=unverified","code":-101}
     }));
-    s.eval::<()>("const now=Date.now;let t=0;Date.now=()=>now()+t")
-        .unwrap();
-    let start = s.call(Request::new("loginStart", json!({}))).unwrap();
-    s.eval::<()>("t+=2100").unwrap();
+    let start = start_qr_login(&mut s);
     assert!(
-        s.call(Request::new("loginPoll", json!({"key":start["key"]})))
+        poll_qr_after(&mut s, &start, 2100)
             .unwrap_err()
             .to_string()
             .contains("未确认账号")

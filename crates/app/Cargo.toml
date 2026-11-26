@@ -29,6 +29,8 @@ slint = {version="=1.19.1",default-features=false,features=["std","backend-andro
 [target.'cfg(windows)'.dependencies]
 slint = {version="=1.19.1",default-features=false,features=["unstable-winit-030"]}
 windows-sys = {version="0.61",features=["Win32_Foundation","Win32_Graphics_Gdi","Win32_UI_HiDpi","Win32_UI_Shell","Win32_UI_WindowsAndMessaging"]}
+[dev-dependencies]
+keyring = "3"
 [target.'cfg(windows)'.dev-dependencies]
 windows-sys = {version="0.61",features=["Win32_Foundation","Win32_Graphics_Dwm","Win32_UI_WindowsAndMessaging"]}
 [build-dependencies]

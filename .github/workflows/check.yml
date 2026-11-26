@@ -35,4 +35,5 @@ jobs:
           export TOOLCHAIN="$ANDROID_HOME/ndk/29.0.14206865/toolchains/llvm/prebuilt/linux-x86_64/bin"
           export CC_aarch64_linux_android="$TOOLCHAIN/aarch64-linux-android26-clang"
           export AR_aarch64_linux_android="$TOOLCHAIN/llvm-ar"
+          export BINDGEN_EXTRA_CLANG_ARGS_aarch64_linux_android="--target=aarch64-linux-android26 --sysroot=$TOOLCHAIN/../sysroot"
           cargo check -p music-app --lib --target aarch64-linux-android

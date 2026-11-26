@@ -327,6 +327,7 @@ mod tests {
 
     #[test]
     fn video_requires_capability_and_checks_the_separate_audio_url() -> Result<()> {
+        keyring::set_default_credential_builder(keyring::mock::default_credential_builder());
         let dir = tempfile::tempdir()?;
         let source = dir.path().join("source");
         let plugins = dir.path().join("plugins");
@@ -359,13 +360,8 @@ mod tests {
                 plugins.join("fixture.ypm.zip"),
                 music_plugin_host::bundle(&source)?,
             )?;
-            assert!(
-                workers
-                    .plugin(&rt, "fixture", &watch)
-                    .unwrap_err()
-                    .to_string()
-                    .contains(message)
-            );
+            let error = workers.plugin(&rt, "fixture", &watch).unwrap_err();
+            assert!(error.to_string().contains(message), "{error:#}");
         }
         let bad = Request::new("resolve", json!({"id":"bad-quality","video":true}));
         assert!(
