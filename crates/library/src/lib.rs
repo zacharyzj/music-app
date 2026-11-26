@@ -301,6 +301,22 @@ impl Library {
                 let p = self.path(id)?.with_extension("lrc");
                 Ok(json!({"lrc":std::fs::read_to_string(p).unwrap_or_default()}))
             }
+            "isLiked" => {
+                let mut lookup = self
+                    .db
+                    .prepare_cached("SELECT EXISTS(SELECT 1 FROM liked WHERE id=?1)")?;
+                let mut result = serde_json::Map::new();
+                for track in a["ids"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Value::as_str)
+                {
+                    let liked: bool = lookup.query_row([track], |r| r.get(0))?;
+                    result.insert(track.to_owned(), Value::Bool(liked));
+                }
+                Ok(Value::Object(result))
+            }
             "like" => {
                 if a["on"] == true {
                     self.db
@@ -325,6 +341,7 @@ impl Library {
                             r.get(0)
                         })?;
                 let mut ids: Vec<String> = serde_json::from_str(&s)?;
+                let old_len = ids.len();
                 let track = a["track"].as_str().unwrap_or("").to_owned();
                 if r.op == "addToPlaylist" {
                     if !ids.contains(&track) {
@@ -333,11 +350,14 @@ impl Library {
                 } else {
                     ids.retain(|x| x != &track);
                 }
-                self.db.execute(
-                    "UPDATE playlists SET tracks=?1 WHERE id=?2",
-                    params![serde_json::to_string(&ids)?, id],
-                )?;
-                Ok(Value::Null)
+                let changed = ids.len() != old_len;
+                if changed {
+                    self.db.execute(
+                        "UPDATE playlists SET tracks=?1 WHERE id=?2",
+                        params![serde_json::to_string(&ids)?, id],
+                    )?;
+                }
+                Ok(json!(changed))
             }
             "deletePlaylist" => {
                 self.db.execute("DELETE FROM playlists WHERE id=?1", [id])?;
@@ -474,6 +494,26 @@ mod tests {
             ))
             .unwrap();
         assert!(p["items"].as_array().unwrap().is_empty());
+        let track = "local-track";
+        let membership = json!({"id":id, "track":track});
+        for (op, changed) in [
+            ("addToPlaylist", true),
+            ("addToPlaylist", false),
+            ("removeFromPlaylist", true),
+        ] {
+            assert_eq!(
+                lib.call(Request::new(op, membership.clone())).unwrap(),
+                changed
+            );
+        }
+        for on in [true, false] {
+            lib.call(Request::new("like", json!({"id":track,"on":on})))
+                .unwrap();
+            let result = lib
+                .call(Request::new("isLiked", json!({"ids":[track,"another"]})))
+                .unwrap();
+            assert_eq!(result, json!({track:on,"another":false}));
+        }
     }
     #[test]
     fn scan_incremental_cancel_and_offline_root() {

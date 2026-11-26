@@ -5,8 +5,9 @@ import { t } from "./i18n.js";
 const PAGE = 50;
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const offsetOf = (value) => Math.max(0, Math.floor(Number(value) || 0));
-const currentId = () => host.storage.get("account")?.id || "";
+const currentId = () => String(host.storage.get("account")?.id || "");
 let loginSequence = 0;
+let likedPageOrder;
 
 export async function account() {
   if (!hasSession()) return null;
@@ -105,6 +106,7 @@ export async function signIn() {
 export function signOut() {
   // 仅退出本插件，避免使用户官方客户端的登录失效。
   loginSequence++;
+  likedPageOrder = undefined;
   resetSession();
 }
 
@@ -169,31 +171,46 @@ export async function artist({ id: value }) {
   return { artist: model.artist(j.artist), tracks: (j.hotSongs || []).map((x) => model.track(x)), albums: (albums.hotAlbums || []).map(model.album), related: [] };
 }
 
+function playlistTrackIds(playlist, byAddedTime) {
+  const entries = playlist.trackIds || [];
+  if (byAddedTime) {
+    // at 是歌曲加入这张歌单的时间。稳定排序保留同一时间及缺少时间的条目顺序。
+    const addedTime = (entry) => Math.max(0, Number(entry.at) || 0);
+    entries.sort((a, b) => addedTime(b) - addedTime(a));
+  }
+  return entries.map((entry) => String(entry.id));
+}
+
 export async function playlist({ id: value }) {
   const j = await api("/api/v6/playlist/detail", { id: id(value), n: 1000, s: 0 });
   if (!j.playlist) fail("unavailable", "歌单不存在，或没有访问权限");
   const p = j.playlist;
-  const ids = (p.trackIds || []).map((x) => String(x.id));
+  const info = model.playlist(p, currentId());
+  const ids = playlistTrackIds(p, info.fixed);
   if (ids.length > 10000) fail("unsupported", "该歌单超过一万首，暂不支持一次载入，请拆分后再打开");
   const privileges = new Map((j.privileges || []).map((x) => [String(x.id), x]));
   const known = new Map((p.tracks || []).map((x) => [String(x.id), model.track(x, privileges.get(String(x.id)))]));
   const missing = ids.filter((x) => !known.has(x));
   for (const t of await details(missing)) known.set(t.id, t);
   const tracks = ids.length ? ids.map((x) => known.get(x)) : [...known.values()];
-  return { ...model.playlist(p, currentId()), tracks, trackCount: p.trackCount ?? tracks.length };
+  return { ...info, tracks, trackCount: p.trackCount ?? tracks.length };
+}
+
+async function* userPlaylistPages(uid) {
+  // API 最多 1000 条一页；按 more 取完，不能静默丢失后面的歌单。
+  for (let offset = 0; offset < 10000; offset += 1000) {
+    const j = await api("/api/user/playlist", { uid, limit: 1000, offset, includeVideo: false });
+    const items = j.playlist || [];
+    yield items.map((x) => model.playlist(x, uid));
+    if (!j.more || !items.length) return;
+  }
+  fail("unsupported", "账号歌单数量超过插件当前支持范围");
 }
 
 export async function playlists() {
-  const user = requireAccount();
   const result = [];
-  // API 最多 1000 条一页；按 more 取完，不能静默丢失后面的歌单。
-  for (let offset = 0; offset < 10000; offset += 1000) {
-    const j = await api("/api/user/playlist", { uid: user.id, limit: 1000, offset, includeVideo: false });
-    const items = j.playlist || [];
-    result.push(...items.map((x) => model.playlist(x, user.id)));
-    if (!j.more || !items.length) return result;
-  }
-  fail("unsupported", "账号歌单数量超过插件当前支持范围");
+  for await (const page of userPlaylistPages(String(requireAccount().id))) result.push(...page);
+  return result;
 }
 
 async function likedIds() {
@@ -207,10 +224,37 @@ async function likedIds() {
   return ids;
 }
 
+async function readLikedOrder(uid) {
+  for await (const page of userPlaylistPages(uid)) {
+    const favorite = page.find((p) => p.fixed);
+    if (!favorite) continue;
+    // trackIds 包含全歌单，歌曲详情仅按当前页取。
+    const { playlist } = await api("/api/v6/playlist/detail", { id: id(favorite.id), n: 1, s: 0 });
+    if (!Array.isArray(playlist?.trackIds)) break;
+    const ids = playlistTrackIds(playlist, true);
+    if (ids.length >= (playlist.trackCount ?? favorite.trackCount)) return ids;
+    if (!ids.length) break;
+    return [...new Set([...ids, ...await likedIds()])];
+  }
+  return null;
+}
+
 export async function liked({ offset = 0 }) {
-  const ids = await likedIds();
   const start = offsetOf(offset);
-  return { tracks: await details(ids.slice(start, start + PAGE)), more: start + PAGE < ids.length };
+  const uid = String(requireAccount().id);
+  if (!start || likedPageOrder?.uid !== uid) {
+    let ordered;
+    try { ordered = await readLikedOrder(uid); }
+    catch (e) {
+      if (!["failed", "unavailable", "unsupported"].includes(e.code)) throw e;
+    }
+    likedPageOrder = {
+      uid, ids: ordered ?? await likedIds(),
+      title: ordered ? t("喜欢的歌曲") : t("喜欢的歌曲 · 网易云返回顺序"),
+    };
+  }
+  const { ids, title } = likedPageOrder;
+  return { title, tracks: await details(ids.slice(start, start + PAGE)), more: start + PAGE < ids.length };
 }
 
 export async function isLiked({ ids = [] }) {
@@ -222,6 +266,7 @@ export async function isLiked({ ids = [] }) {
 export async function like({ id: value, on }) {
   requireAccount();
   await api("/api/radio/like", { alg: "itembased", trackId: id(value), like: Boolean(on), time: "3" });
+  likedPageOrder = undefined;
   host.storage.remove("likedIds");
   host.storage.remove("likedAt");
 }

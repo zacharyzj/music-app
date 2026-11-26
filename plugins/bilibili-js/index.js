@@ -56,7 +56,33 @@ export async function browse({page}) {
   return {title:page, tracks:result.tracks};
 }
 
-export async function stream({id}) {
+function firstMedia(representations) {
+  for (const rep of representations) {
+    for (const raw of [rep.baseUrl || rep.base_url || rep.url, ...(rep.backupUrl || rep.backup_url || [])]) {
+      const url = mediaUrl(raw);
+      if (url) return url;
+    }
+  }
+  return "";
+}
+
+// Bilibili's quality IDs describe nominal resolution, including for portrait videos.
+const qualityHeight = {6:240, 16:360, 32:480, 64:720, 74:720, 80:1080, 112:1080,
+  116:1080, 120:2160, 125:2160, 126:2160, 127:4320};
+
+function videoQualities(tracks) {
+  const byHeight = new Map();
+  tracks.sort((a, b) => Number(b.codecid === 7) - Number(a.codecid === 7) || b.bandwidth - a.bandwidth);
+  for (const rep of tracks) {
+    const height = qualityHeight[rep.id] || Math.min(rep.width || rep.height, rep.height);
+    if (!Number.isInteger(height) || height <= 0 || byHeight.has(height)) continue;
+    const url = firstMedia([rep]);
+    if (url) byHeight.set(height, {height, url});
+  }
+  return [...byHeight.values()].sort((a, b) => b.height - a.height);
+}
+
+export async function stream({id, video = false}) {
   if (typeof id !== "string" || !BV.test(id)) throw new Error("无效的哔哩哔哩 BV 号");
   const cookies = session();
   const referrer = SITE + "video/" + id + "/";
@@ -64,16 +90,31 @@ export async function stream({id}) {
   const cid = view.data?.pages?.[0]?.cid || view.data?.cid;
   if (!cid) throw new Error("这个视频没有可播放的分 P");
   const params = new URLSearchParams({bvid:id, cid, fnval:16});
+  if (video) {
+    params.set("qn", "127");
+    params.set("fourk", "1");
+  }
   const {data} = await jsonRequest(API + "/x/player/playurl?" + params, {cookies, referrer});
   if (data?.is_preview) throw new Error("当前账号只获准试看这个视频");
   const audio = [...(data?.dash?.audio || [])].sort((a, b) => b.bandwidth - a.bandwidth);
-  if (data?.durl?.length === 1) audio.push(data.durl[0]);
-  for (const rep of audio) {
-    for (const raw of [rep.baseUrl || rep.base_url || rep.url, ...(rep.backupUrl || rep.backup_url || [])]) {
-      const url = mediaUrl(raw);
-      if (url) return {url, referrer};
+  const audioUrl = firstMedia(audio);
+  const combined = data?.durl?.length === 1 ? firstMedia(data.durl) : "";
+  if (video) {
+    const quality = Number(data?.quality) || 80;
+    const tracks = (data?.dash?.video || []).filter(rep => !rep.id || rep.id <= quality);
+    const qualities = videoQualities(tracks);
+    const initial = qualities.find(q => q.height <= 1080) || qualities[0];
+    // Legacy DASH responses may omit dimensions for the single picture stream.
+    const url = initial?.url || firstMedia(tracks);
+    if (url && audioUrl) return {url, audioUrl, referrer, qualities};
+    if (combined) {
+      const height = qualityHeight[data?.quality];
+      return {url:combined, referrer, qualities:height ? [{height, url:combined}] : []};
     }
+    if (url && !audio.length) return {url, referrer, qualities};
+    throw new Error("哔哩哔哩未向当前账号或游客提供可播放的视频");
   }
+  if (audioUrl || combined) return {url:audioUrl || combined, referrer};
   throw new Error("哔哩哔哩未向当前账号或游客提供可播放的音轨");
 }
 

@@ -57,7 +57,14 @@ impl Workers {
         job.generation != self.generation.load(Ordering::Relaxed)
             && matches!(
                 job.request.op.as_str(),
-                "search" | "home" | "browse" | "album" | "artist" | "playlist" | "loginPoll"
+                "search"
+                    | "home"
+                    | "browse"
+                    | "album"
+                    | "artist"
+                    | "playlist"
+                    | "isLiked"
+                    | "loginPoll"
             )
     }
 
@@ -261,17 +268,34 @@ impl Workers {
         }
         drop(db);
         let bytes = std::fs::read(package)?;
-        let value = rt.call(
-            &bytes,
-            &self.root.join("plugin-data"),
-            Request::new(if op == "resolve" { "stream" } else { op }, args.clone()),
-        )?;
+        let data = self.root.join("plugin-data");
         if op == "resolve" {
             let m = manifest(&bytes)?;
+            let mut stream = json!({"id":args["id"]});
+            let video = args["video"] == true;
+            if video {
+                ensure!(
+                    m.capabilities.iter().any(|c| c == "video"),
+                    "音乐源不支持视频播放"
+                );
+                stream["video"] = json!(true);
+            }
+            let value = rt.call(&bytes, &data, Request::new("stream", stream))?;
             ensure!(
                 music_plugin_host::media_allowed(value["url"].as_str().unwrap_or(""), &m.media),
                 "播放地址不在插件声明的媒体域名内"
             );
+            if video && let Some(audio) = value.get("audioUrl") {
+                ensure!(
+                    music_plugin_host::media_allowed(audio.as_str().unwrap_or(""), &m.media),
+                    "视频音轨不在插件声明的媒体域名内"
+                );
+            }
+            if video && let Some(qualities) = value.get("qualities") {
+                let choices: Vec<music_player::VideoQuality> =
+                    serde_json::from_value(qualities.clone())?;
+                ensure!(choices.iter().all(|q| q.height > 0 && music_plugin_host::media_allowed(&q.url, &m.media)), "视频清晰度地址不在插件声明的媒体域名内");
+            }
             if let Some(referrer) = value.get("referrer") {
                 let page = referrer.as_str().unwrap_or("");
                 ensure!(
@@ -282,8 +306,9 @@ impl Workers {
                     "播放来源页必须是插件声明的 HTTPS 域名及普通路径"
                 );
             }
+            return Ok(value);
         }
-        Ok(value)
+        rt.call(&bytes, &data, request.clone())
     }
 }
 
@@ -299,6 +324,59 @@ fn retire(plugins: &mut HashMap<String, PluginWorker>, id: &str) {
 mod tests {
     use super::*;
     use music_core::ResourceKey;
+
+    #[test]
+    fn video_requires_capability_and_checks_the_separate_audio_url() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let source = dir.path().join("source");
+        let plugins = dir.path().join("plugins");
+        std::fs::create_dir(&source)?;
+        std::fs::create_dir(&plugins)?;
+        std::fs::write(
+            source.join("index.js"),
+            r#"export function stream({id}) {
+            if (id === "bad-quality") return {url:"https://media.example/video",
+                qualities:[{height:720,url:"https://other.example/video"}]};
+            return {url:"https://media.example/video",audioUrl:"https://other.example/audio"};
+        }"#,
+        )?;
+        let workers = Workers {
+            root: dir.path().into(),
+            library: Arc::new(Mutex::new(Library::open(dir.path())?)),
+            out: mpsc::channel().0,
+            download_tx: mpsc::channel().0,
+            generation: Arc::new(AtomicU64::new(0)),
+        };
+        let rt = Runtime::new();
+        let watch = Request::new("resolve", json!({"id":"1","video":true}));
+        for (caps, message) in [(json!([]), "不支持视频"), (json!(["video"]), "视频音轨")]
+        {
+            std::fs::write(source.join("plugin.json"), json!({
+                "id":"fixture","name":"fixture","version":"1","main":"index.js","capabilities":caps,
+                "permissions":{"media":["media.example"]}
+            }).to_string())?;
+            std::fs::write(
+                plugins.join("fixture.ypm.zip"),
+                music_plugin_host::bundle(&source)?,
+            )?;
+            assert!(
+                workers
+                    .plugin(&rt, "fixture", &watch)
+                    .unwrap_err()
+                    .to_string()
+                    .contains(message)
+            );
+        }
+        let bad = Request::new("resolve", json!({"id":"bad-quality","video":true}));
+        assert!(
+            workers
+                .plugin(&rt, "fixture", &bad)
+                .unwrap_err()
+                .to_string()
+                .contains("清晰度地址")
+        );
+        Ok(())
+    }
 
     #[test]
     fn queued_downloads_resolve_for_local_playback() {

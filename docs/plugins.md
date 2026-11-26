@@ -66,6 +66,10 @@ API 请求必须为清单允许的 HTTPS 域名；支持精确域名和 `*.examp
 
 `stream({ id })` 返回 `{ url, referrer? }`。可选的 `referrer` 为音乐源已声明的 HTTPS 来源页，路径支持字母、数字和 `/._-~`。播放器仅对本曲目设置 HTTP Referer。哔哩哔哩在 API 请求中使用本插件加密保存的会话，并用 BV 号对应的视频页作为播放来源页。
 
+音乐源可在 `capabilities` 中声明 `video`。用户点击「看视频」时，宿主调用 `stream({ id, video: true })`。音画合一的视频返回 `{ url, referrer? }`，分离的 DASH 流返回 `{ url, audioUrl, referrer? }`，其中 `url` 是画面地址。宿主按同一套媒体域名权限校验两个地址。普通播放继续调用 `stream({ id })` 获取音频。
+
+可选字段 `qualities` 是同一视频可用画面流的列表，每项包含正整数 `height`（如 720）和媒体地址 `url`。各档位须共用同一音轨和时间轴，`url` 顶层字段指定自动档的地址。宿主校验每个地址，只保存用户选定的分辨率。首选档位缺失时，播放器优先使用较低的可用档位。省略 `qualities` 的旧插件仍可使用进度条和倍速。
+
 曲目可以返回可选的布尔字段 `downloadable`。`false` 会在歌曲行显示「未开放下载」，`true` 允许点击下载。省略字段会沿用原来的行为，由插件在点击时判断。插件仍应在导出 `download({ id })` 时核对最新权限，播放权限另由曲目的 `unavailable` 控制。免登录筛选同时要求插件声明 `anonymous`、`download` 和媒体域名，并由曲目明确返回 `downloadable: true`。
 
 不同插件的搜索在独立线程返回，同一插件的调用串行复用一个 QuickJS 会话。宿主按来源分别翻页。下载任务轮到执行或重试时才调用 `download` 获取最新地址。

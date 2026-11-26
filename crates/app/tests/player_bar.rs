@@ -1,25 +1,12 @@
-use music_app_ui::{AppWindow, PlayerMode};
-use slint::platform::software_renderer::{MinimalSoftwareWindow, RepaintBufferType};
-use slint::platform::{self, Key, Platform, PointerEventButton, WindowAdapter, WindowEvent};
-use slint::{ComponentHandle, LogicalPosition, PhysicalSize, PlatformError, SharedString, Window};
+mod support;
+use music_app_ui::{AppWindow, PlayerMode, Row};
+use slint::platform::{Key, PointerEventButton, WindowEvent};
+use slint::{
+    ComponentHandle, LogicalPosition, ModelRc, PhysicalSize, PlatformError, SharedString, Window,
+};
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
-use std::time::Duration;
-
-struct TestPlatform {
-    window: Rc<MinimalSoftwareWindow>,
-    time: Rc<Cell<Duration>>,
-}
-
-impl Platform for TestPlatform {
-    fn create_window_adapter(&self) -> Result<Rc<dyn WindowAdapter>, PlatformError> {
-        Ok(self.window.clone())
-    }
-
-    fn duration_since_start(&self) -> Duration {
-        self.time.get()
-    }
-}
+use support::{click, test_clock};
 
 fn chord(window: &Window, modifier: Option<Key>, key: impl Into<SharedString>, repeat: bool) {
     let text = key.into();
@@ -40,26 +27,62 @@ fn chord(window: &Window, modifier: Option<Key>, key: impl Into<SharedString>, r
     }
 }
 
-fn click(window: &Window, x: f32, y: f32) {
-    let position = LogicalPosition::new(x, y);
-    let button = PointerEventButton::Left;
-    window.dispatch_event(WindowEvent::PointerMoved { position });
-    window.dispatch_event(WindowEvent::PointerPressed { position, button });
-    window.dispatch_event(WindowEvent::PointerReleased { position, button });
+#[test]
+fn player_stays_at_the_bottom_when_search_content_changes() -> anyhow::Result<()> {
+    let _clock = test_clock()?;
+    let ui = AppWindow::new()?;
+    ui.show()?;
+    let window = ui.window();
+    ui.set_sources(ModelRc::from(
+        ["本地音乐".into(), "24bit 无损音乐".into()].as_slice(),
+    ));
+    ui.set_source_index(1);
+    ui.set_search_page(true);
+    ui.set_anonymous_source(true);
+    ui.set_can_filter(true);
+    ui.set_online_sources(ModelRc::from(
+        ["全部音乐源".into(), "24bit 无损音乐".into()].as_slice(),
+    ));
+    ui.set_heading("搜索结果 · 24bit 无损音乐".into());
+    let result = Row {
+        kind: "track".into(),
+        title: "歌曲".into(),
+        ..Default::default()
+    };
+    for (w, h, bar_height) in [(1240, 820, 110), (720, 480, 96), (800, 1000, 96)] {
+        window.set_size(PhysicalSize::new(w, h));
+        let check = |page| -> anyhow::Result<()> {
+            let frame = window.take_snapshot()?;
+            let pixel = |x, y| frame.as_slice()[(y * w + x) as usize];
+            let sidebar = pixel(4, 4);
+            let top = (4..h).find(|&y| pixel(4, y) != sidebar);
+            assert_eq!(top, Some(h - bar_height), "{page} at {w}×{h}");
+            let bar = pixel(4, h - bar_height);
+            for x in [4, w - 5] {
+                assert!(
+                    pixel(x, h - 1) == bar,
+                    "{page} leaves a gap below the player at {w}×{h}"
+                );
+            }
+            Ok(())
+        };
+        ui.set_rows(ModelRc::default());
+        ui.set_busy(true);
+        check("loading search")?;
+        ui.set_busy(false);
+        check("empty search")?;
+        ui.set_rows(ModelRc::from(std::slice::from_ref(&result)));
+        check("one result")?;
+        ui.set_show_lyrics(true);
+        check("lyrics")?;
+        ui.set_show_lyrics(false);
+    }
+    Ok(())
 }
 
 #[test]
 fn shortcuts_clicks_and_tooltips_in_the_player_window() -> anyhow::Result<()> {
-    let adapter = MinimalSoftwareWindow::new(RepaintBufferType::NewBuffer);
-    let time = Rc::new(Cell::new(Duration::ZERO));
-    platform::set_platform(Box::new(TestPlatform {
-        window: adapter,
-        time: time.clone(),
-    }))?;
-    let advance = |ms| {
-        time.set(time.get() + Duration::from_millis(ms));
-        platform::update_timers_and_animations();
-    };
+    let advance = test_clock()?;
     let ui = AppWindow::new()?;
     ui.show()?;
     let window = ui.window();

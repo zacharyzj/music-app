@@ -76,6 +76,121 @@ fn upstream_search_and_large_account_pages() {
     assert_eq!(p["links"][1]["args"]["page"], "cloud:100");
 }
 #[test]
+fn netease_liked_tracks_sort_by_add_time_before_paging() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = session(upstream(), dir.path());
+    let entries: Vec<_> = (1..=53)
+        .map(|i| match i {
+            1 => json!({"id":i}),
+            2 => json!({"id":i, "at":0}),
+            3 | 4 => json!({"id":i, "at":10000}),
+            _ => json!({"id":i, "at":i}),
+        })
+        .collect();
+    // Details come back in a different order and one recording is no longer available.
+    let songs: Vec<_> = (1..=53)
+        .filter(|&id| id != 52)
+        .map(|id| json!({"id":id}))
+        .collect();
+    {
+        let mut host = s.host.borrow_mut();
+        host.storage.set("account", json!({"id":7})).unwrap();
+        host.storage
+            .set("deviceId", json!("fixture-device"))
+            .unwrap();
+        host.storage
+            .set("cookies", json!({"MUSIC_U":"fixture"}))
+            .unwrap();
+        host.fixture = Some(json!({
+            "user/playlist":{"responses":[
+                {"playlist":[{"id":8,"userId":7,"specialType":0},{"id":9,"userId":6,"specialType":5}],"more":true},
+                {"playlist":[{"id":10,"userId":7,"specialType":5}],"more":false}
+            ]},
+            "v6/playlist/detail":{"playlist":{"id":10,"trackCount":53,"trackIds":entries}},
+            "v3/song/detail":{"songs":songs}
+        }));
+    }
+    let page_ids = |v: &Value| {
+        v["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["key"]["id"].as_str().unwrap().parse::<i32>().unwrap())
+            .collect::<Vec<_>>()
+    };
+    let credentials = std::fs::read(dir.path().join("test.enc")).unwrap();
+    let first = s.call(Request::new("liked", json!({}))).unwrap();
+    let order: Vec<_> = [3, 4]
+        .into_iter()
+        .chain((5..=53).rev())
+        .chain([1, 2])
+        .collect();
+    assert_eq!(page_ids(&first), order[..50]);
+    assert_eq!(first["items"][3]["unavailable"], true);
+    assert_eq!(first["more"], true);
+    assert!(
+        s.host.borrow().fixture.as_ref().unwrap()["user/playlist"]["responses"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    s.host.borrow_mut().fixture = Some(json!({"v3/song/detail":{"songs":songs}}));
+    let next = s.call(Request::new("liked", json!({"offset":50}))).unwrap();
+    assert_eq!(page_ids(&next), order[50..]);
+    assert_eq!(next["more"], false);
+    assert_eq!(
+        std::fs::read(dir.path().join("test.enc")).unwrap(),
+        credentials,
+        "paging without Set-Cookie must not rewrite stored credentials"
+    );
+
+    // The other navigation entry for this playlist agrees. An ordinary playlist keeps its manual order.
+    for (special_type, expected) in [(5, vec![12, 11]), (0, vec![11, 12])] {
+        s.host.borrow_mut().fixture = Some(json!({"v6/playlist/detail":{"playlist":{
+            "id":10,"userId":7,"specialType":special_type,"trackIds":[{"id":11,"at":1},{"id":12,"at":2}],
+            "tracks":[{"id":12},{"id":11}]
+        }}}));
+        let playlist = s
+            .call(Request::new("playlist", json!({"id":"10"})))
+            .unwrap();
+        assert_eq!(page_ids(&playlist), expected);
+    }
+
+    // A successful edit invalidates the old page order. Missing playlist metadata falls back to membership.
+    s.host.borrow_mut().fixture = Some(
+        json!({"radio/like":{"code":200},"user/playlist":{"playlist":[]},
+        "song/like/get":{"ids":[9,7,8]},"v3/song/detail":{"songs":songs}}),
+    );
+    s.call(Request::new("like", json!({"id":"3","on":false})))
+        .unwrap();
+    let fallback = s.call(Request::new("liked", json!({"offset":1}))).unwrap();
+    assert_eq!(page_ids(&fallback), [7, 8]);
+    assert_eq!(fallback["title"], "喜欢的歌曲 · 网易云返回顺序");
+    assert_eq!(
+        s.call(Request::new("isLiked", json!({"ids":["9","3"]})))
+            .unwrap(),
+        json!({"9":true,"3":false})
+    );
+    for (entries, expected, title) in [
+        (
+            json!([{"id":8,"at":4},{"id":7,"at":6}]),
+            vec![7, 8, 9],
+            "喜欢的歌曲",
+        ),
+        (json!([]), vec![9, 7, 8], "喜欢的歌曲 · 网易云返回顺序"),
+    ] {
+        s.host.borrow_mut().fixture = Some(json!({
+            "user/playlist":{"playlist":[{"id":10,"userId":7,"specialType":5}]},
+            "v6/playlist/detail":{"playlist":{"trackCount":3,"trackIds":entries}},
+            "v3/song/detail":{"songs":songs}
+        }));
+        let page = s.call(Request::new("liked", json!({}))).unwrap();
+        assert_eq!(page_ids(&page), expected);
+        assert_eq!(page["title"], title);
+    }
+}
+
+#[test]
 fn trial_fallback_and_lyrics() {
     let dir = tempfile::tempdir().unwrap();
     let mut s = session(upstream(), dir.path());
@@ -420,6 +535,7 @@ fn bilibili_search_uses_issued_cookies_and_resolves_video_audio() {
     let mut s = bilibili(dir.path());
     let m = s.host.borrow().package.manifest.clone();
     assert_eq!(m.search_page_size.unwrap().get(), 20);
+    assert!(m.capabilities.iter().any(|c| c == "video"));
     assert!(!m.supports_likes());
     assert!(
         !m.capabilities
@@ -435,6 +551,7 @@ fn bilibili_search_uses_issued_cookies_and_resolves_video_audio() {
     );
     let view = format!("https://api.bilibili.com/x/web-interface/view?bvid={bv}");
     let play = format!("https://api.bilibili.com/x/player/playurl?bvid={bv}&cid=99&fnval=16");
+    let pictures = format!("{play}&qn=127&fourk=1");
     s.host.borrow_mut().fixture = Some(json!({
         (entry):{"_expectCookie":"","_cookies":["buvid3=visitor; Path=/","unrelated=ignored; Path=/"]},
         (format!("{query}&page=1")):{"_expectCookie":"buvid3=visitor","code":0,"data":{"numPages":2,"result":[video]}},
@@ -465,6 +582,41 @@ fn bilibili_search_uses_issued_cookies_and_resolves_video_audio() {
         s.call(Request::new("stream", json!({"id":bv}))).unwrap(),
         json!({"url":"https://hdslb.bilivideo.com/public.m4s","referrer":"https://www.bilibili.com/video/BV123456789a/"})
     );
+    let picture = "https://cdn.bilivideo.cn/720.m4s";
+    let sound = "https://cdn.bilivideo.cn/audio.m4s?token=a,b";
+    let combined = "https://cdn.bilivideo.cn/muxed.mp4";
+    let page_url = format!("https://www.bilibili.com/video/{bv}/");
+    s.host.borrow_mut().fixture.as_mut().unwrap()[&pictures] = json!({
+        "_expectCookie":"SESSDATA=user", "code":0, "data":{"quality":64,"dash":{
+            "video":[
+                {"id":16,"height":360,"baseUrl":"https://cdn.bilivideo.cn/360.m4s"},
+                {"id":64,"height":720,"codecid":12,"baseUrl":"https://cdn.bilivideo.cn/hevc.m4s"},
+                {"id":80,"height":1080,"baseUrl":"https://cdn.bilivideo.cn/1080.m4s"},
+                {"id":64,"height":720,"codecid":7,"base_url":"https://other.example/video","backup_url":[picture]}
+            ],
+            "audio":[{"baseUrl":sound}]
+        }}
+    });
+    let watch = Request::new("stream", json!({"id":bv,"video":true}));
+    assert_eq!(
+        s.call(watch.clone()).unwrap(),
+        json!({"url":picture,"audioUrl":sound,"referrer":page_url,"qualities":[
+            {"height":720,"url":picture},{"height":360,"url":"https://cdn.bilivideo.cn/360.m4s"}
+        ]})
+    );
+    s.host.borrow_mut().fixture.as_mut().unwrap()[&pictures] = json!({"code":0,"data":{"quality":32,"durl":[{"url":combined}],
+            "dash":{"video":[{"id":16,"baseUrl":picture}],"audio":[]}}});
+    assert_eq!(
+        s.call(watch.clone()).unwrap(),
+        json!({"url":combined,"referrer":page_url,"qualities":[{"height":480,"url":combined}]})
+    );
+    for data in [
+        json!({"dash":{"audio":[{"baseUrl":sound}]}}),
+        json!({"is_preview":1,"durl":[{"url":combined}]}),
+    ] {
+        s.host.borrow_mut().fixture.as_mut().unwrap()[&pictures] = json!({"code":0,"data":data});
+        assert!(s.call(watch.clone()).is_err());
+    }
     s.host.borrow_mut().fixture.as_mut().unwrap()[format!("{query}&page=1")] = json!({"code":-352});
     assert!(
         s.call(Request::new("search", args))

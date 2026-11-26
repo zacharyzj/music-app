@@ -2,13 +2,11 @@
 
 Slint + Rust + libmpv 音乐播放器，使用 QuickJS 执行独立 JavaScript 音乐源。默认只提供本地音乐。网易云、哔哩哔哩、24bit、Audius 和 Incompetech 音乐源均可单独安装。运行播放器无需安装 Flutter 或 Node.js，也无需自行部署 API 服务。
 
-当前版本为 **0.2.9**，应用内名称为 Music Player。版本和工具链分别由 [Cargo.toml](Cargo.toml) 与 [rust-toolchain.toml](rust-toolchain.toml) 管理。
+当前版本为 **0.2.10**，应用内名称为 Music Player。版本和工具链分别由 [Cargo.toml](Cargo.toml) 与 [rust-toolchain.toml](rust-toolchain.toml) 管理。
 
 ## Windows 使用
 
-解压 `dist/MusicPlayer-windows-x64-0.2.9.zip`，运行 `music-app.exe`，保留同目录的 `mpv-2.dll`。
-
-`dist/` 为本地构建产物，不随 Git 仓库分发；首次克隆请按下文构建。
+下载 Windows x64 便携包，解压后运行 `music-app.exe`，并将 `mpv-2.dll` 放在同一目录。[下载 Music Player 0.2.10](https://github.com/zacharyzj/music-app/releases/download/plugins-v0.2.10/MusicPlayer-windows-x64-0.2.10.zip)
 
 1. 设置与插件 → 添加音乐目录，扫描标签、封面和同名 `.lrc`。
 2. 在「设置与插件」打开「在线插件」，从 GitHub 列表选择音乐源并点击「安装」。也可以粘贴其他 HTTPS 索引或插件 ZIP 的地址，或用「导入本地 ZIP」。安装后点击「启用」，卡片会以主题色高亮。再次点击「已启用」可停用。
@@ -40,7 +38,7 @@ Windows 跨屏拖动按屏幕长边、短边计算统一缩放倍数，保持窗
 在「设置与插件」中导入并启用想用的音乐源，然后回到「本地音乐」搜索。本地有匹配时直接显示本地结果。本地没有匹配时，播放器同时搜索支持该类型的已启用音乐源，结果随各源返回逐批显示。可以切换来源，或点「仅看免登录可下载」查看发布者明确开放完整下载的歌曲。同名录音保留各自的歌手、来源和下载状态。
 
 - **24bit 无损音乐** 使用官网的两个游客搜索分库，支持按歌名和歌手查找录音。播放时读取歌曲页的公开音轨。点击下载才向站点查询本次下载额度，额度用完时会显示原因。
-- **哔哩哔哩** 支持游客搜索 B 站视频，结果显示标题、UP 主和时长。可直接播放视频第一分 P 的音轨。选择该源后，点击侧栏「登录」，用哔哩哔哩 App 扫码确认。本地搜不到歌曲时，已启用的 B 站也会参与并行搜索。「仅看免登录可下载」会过滤 B 站结果。
+- **哔哩哔哩** 支持游客搜索 B 站视频，结果显示标题、UP 主和时长。双击条目收听第一分 P 的音轨，点击搜索结果或播放队列里的「看视频」图标可打开独立视频窗口。移动鼠标可显示控制栏，点击或拖动进度条即可跳转。「倍速」（S）提供 0.5× 至 2×，「画质」（Q）列出当前视频对该账号开放的分辨率。切换画质时保留播放进度和暂停状态。空格暂停或继续，F 切换全屏，关闭画面后继续听音频。选择该源后，点击侧栏「登录」，用哔哩哔哩 App 扫码确认。本地搜不到歌曲时，已启用的 B 站也会参与并行搜索。「仅看免登录可下载」会过滤 B 站结果。
 - **Audius 音乐** 可以免登录、免 API Key 搜索中文流行、独立音乐和翻唱。输入「七里香」可以查找同名录音，输入「不动守候」可以找到 MUGUNASHII 的繁体标题《不動守候》。只有发布者向游客开放了完整下载的录音才会显示可点击的「下载」。歌曲下载入库后，也可用简体或繁体歌名离线搜索。列表显示 Audius 上的发布者名称。切换到该源的首页可发现开放下载的华语音乐。[平台下载设置](https://help.audius.co/product/editing-your-release)
 - **Incompetech 开放音乐** 支持按曲名、乐器或作者 Kevin MacLeod 检索，无需账号或 API Key。可用 `Monkeys Spinning Monkeys` 试搜。下载的 MP3 旁会保存同名 `.attribution.txt`，内含作者、作品页和 CC BY 4.0 许可链接。[官方曲库说明](https://incompetech.com/agent-section/)
 - **网易云音乐** 支持按歌曲、专辑、歌手和歌单检索。登录后点击歌曲右侧的「下载」，由网易云下载接口按当前账号和所选音质决定是否提供完整音频。旧版插件可以直接导入新版升级。
@@ -50,7 +48,7 @@ Windows 跨屏拖动按屏幕长边、短边计算统一缩放倍数，保持窗
 
 0.1.x 升级：导入新版 JS 插件即可沿用同一 `netease` ID 的加密会话、设备标识和音质设置。不要先卸载旧源；卸载会清除该源的账号数据。新版不加载 `.wasm`，旧文件保留供旧程序使用。不要同时运行两个版本并修改同一账号或音乐库。
 
-Windows 数据目录：`%APPDATA%/music-api/MusicPlayer/data`。`MUSIC_API_DATA_DIR` 可覆盖位置。队列、索引、歌单和外观存入 SQLite；插件 KV 使用 AES-GCM 加密，主密钥保存在系统凭据服务。退出网易云只清理本插件会话。
+Windows 数据目录为 `%APPDATA%/music-api/MusicPlayer/data`，可用 `MUSIC_API_DATA_DIR` 指定其他位置。播放器会记住音量、静音状态、视频倍速和首选分辨率。静音时退出，下次启动仍是静音，取消静音会恢复先前音量。队列、索引、歌单和外观也存入 SQLite。插件 KV 使用 AES-GCM 加密，主密钥保存在系统凭据服务。退出网易云只清理本插件会话。
 
 仓库名为 `music-app`，数据目录、环境变量 `MUSIC_API_*` 和系统凭据中的历史标识继续兼容已有安装，以便升级后读取原来的音乐库和登录状态。
 
@@ -72,10 +70,10 @@ cargo run -p music-app --locked
 `get-mpv.ps1` 下载固定版本的 libmpv 并校验 SHA-256。生成 Windows 发布包：
 
 ```powershell
-./scripts/build-windows.ps1 -OutputName MusicPlayer-windows-x64-0.2.9
+./scripts/build-windows.ps1 -OutputName MusicPlayer-windows-x64-0.2.10
 ```
 
-发布包位于 `dist/MusicPlayer-windows-x64-0.2.9.zip`；可选插件为 `dist/netease.ypm.zip`、`dist/bilibili.ypm.zip`、`dist/24bit.ypm.zip`、`dist/audius.ypm.zip` 和 `dist/incompetech.ypm.zip`。打包脚本会重新构建插件和 release 主程序，`-Debug` 可生成调试包。
+发布包位于 `dist/MusicPlayer-windows-x64-0.2.10.zip`；可选插件为 `dist/netease.ypm.zip`、`dist/bilibili.ypm.zip`、`dist/24bit.ypm.zip`、`dist/audius.ypm.zip` 和 `dist/incompetech.ypm.zip`。打包脚本会重新构建插件和 release 主程序，`-Debug` 可生成调试包。
 
 主程序包不预装在线源。`cargo xtask plugin` 分别将五个音乐源打包为 `.ypm.zip`。安装器也接受兼容的 YesPlayMusic 插件 ZIP，支持根目录或一层外包装目录中的 `plugin.json`。本宿主实现了网易云使用的 API 子集，不承诺兼容所有 YesPlayMusic 扩展能力。
 
@@ -112,7 +110,7 @@ cargo xtask probe-account "$env:APPDATA/music-api/MusicPlayer/data"
 | `crates/plugin-host` | QuickJS、模块加载、YPM 适配、权限与加密存储 |
 | `crates/app` | Slint 页面、后台任务、封面缓存 |
 | `plugins/24bit-js` | 24bit 双库搜索、公开音轨及按站点额度下载 |
-| `plugins/bilibili-js` | 哔哩哔哩视频搜索、音轨播放及扫码登录插件 |
+| `plugins/bilibili-js` | 哔哩哔哩视频搜索、音视频播放及扫码登录插件 |
 | `plugins/audius-js` | Audius 公开曲库 JS 插件，支持简繁体搜索和按曲下载 |
 | `plugins/incompetech-js` | Kevin MacLeod 开放曲库 JS 插件 |
 | `plugins/netease-js` | 网易云 JS 插件，基于 MIT 上游源码 |

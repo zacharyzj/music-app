@@ -29,7 +29,8 @@ jobs:
           toolchain: '1.99.0'
           targets: aarch64-linux-android
       - uses: android-actions/setup-android@v3
-      - run: sdkmanager 'ndk;29.0.14206865'
+        with:
+          packages: 'ndk;29.0.14206865'
       - run: |
           export TOOLCHAIN="$ANDROID_HOME/ndk/29.0.14206865/toolchains/llvm/prebuilt/linux-x86_64/bin"
           export CC_aarch64_linux_android="$TOOLCHAIN/aarch64-linux-android26-clang"

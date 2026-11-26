@@ -167,6 +167,7 @@ fn playback(url: &str, referrer: Option<&str>) -> Result<()> {
     player.commands.send(Command::Open {
         url: url.into(),
         referrer: referrer.map(str::to_owned),
+        video: None,
     })?;
     let deadline = Instant::now() + Duration::from_secs(25);
     let mut paused = false;
@@ -177,7 +178,7 @@ fn playback(url: &str, referrer: Option<&str>) -> Result<()> {
                 let _ = player.commands.send(Command::Quit);
                 bail!("{e}")
             }
-            Ok(PlayerEvent::Position(p, d)) if p > 0.2 && d > 0.0 => {
+            Ok(PlayerEvent::Position(p, d, _)) if p > 0.2 && d > 0.0 => {
                 if !paused {
                     player.commands.send(Command::Pause(true))?;
                     player.commands.send(Command::Seek(1.0))?;

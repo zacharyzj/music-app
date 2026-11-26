@@ -84,15 +84,16 @@ export async function api(path, data = {}, options = {}) {
     if (code === -462 || code === 405) fail("failed", "网易云要求安全验证，请先在网易云官方客户端完成验证，再稍后扫码重试");
     fail("failed", t("网易云请求失败（{code}）：{message}", { code, message: String(result.message || result.msg || t("请稍后重试")).slice(0, 180) }));
   }
+  const setCookies = response.headers.getSetCookie();
   const cookies = { ...jar };
-  for (const line of response.headers.getSetCookie()) {
+  for (const line of setCookies) {
     const pair = line.split(";", 1)[0];
     Object.assign(cookies, pairs(pair));
   }
   // 退出登录后，旧的在途请求不能把已清除的会话写回来。
-  if (options.persist !== false && (host.storage.get("sessionEpoch") || 0) === epoch) {
+  if (setCookies.length && options.persist !== false && (host.storage.get("sessionEpoch") || 0) === epoch) {
     const current = session();
-    for (const line of response.headers.getSetCookie()) Object.assign(current, pairs(line.split(";", 1)[0]));
+    for (const line of setCookies) Object.assign(current, pairs(line.split(";", 1)[0]));
     host.storage.set("cookies", current);
   }
   return options.withCookies ? { result, cookies } : result;

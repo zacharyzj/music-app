@@ -1,13 +1,14 @@
 {
   "id": "bilibili",
   "name": "哔哩哔哩",
-  "version": "1.0.0",
-  "description": "搜索 B 站视频，收听视频音轨，支持哔哩哔哩客户端扫码登录。",
+  "version": "1.2.0",
+  "description": "搜索 B 站视频，收听音轨或观看视频，支持哔哩哔哩客户端扫码登录。",
   "main": "index.js",
   "playback": "stream",
   "capabilities": [
     "tracksOnly",
-    "readOnly"
+    "readOnly",
+    "video"
   ],
   "searchPageSize": 20,
   "permissions": {

@@ -1,5 +1,5 @@
 import { Palette, LineEdit, ComboBox, Slider, ScrollView, CheckBox } from "std-widgets.slint";
-export struct Row {resource:string,title:string,subtitle:string,album:string,duration:string,kind:string,cover:image,disabled:bool,download-blocked:bool,download-label:string,show-download:bool,account-actions:bool}
+export struct Row {resource:string,title:string,subtitle:string,album:string,duration:string,kind:string,cover:image,disabled:bool,show-video:bool,download-blocked:bool,download-label:string,download-hint:string,show-download:bool,account-actions:bool,liked:bool,like-pending:bool}
 export struct PluginRow { name: string, permissions: string, enabled: bool }
 export struct CatalogRow { title: string, description: string, permissions: string, action-label: string, can-install: bool }
 export struct DownloadRow { title:string, artist:string, status:string, fraction:float, active:bool, failed:bool }
@@ -29,6 +29,14 @@ component IconButton inherits Rectangle {
     animate background {duration:140ms;}
     Image {source:root.icon;colorize:root.primary ? Theme.on-accent : root.active ? Theme.accent : Theme.ink;width:18px;height:18px;x:(parent.width - self.width)/2;y:(parent.height - self.height)/2;}
     touch:=TouchArea {enabled:root.enabled;mouse-cursor:pointer;clicked=>{root.clicked();}}
+}
+component ListIconButton inherits IconButton {
+    in property <string> description;
+    accessible-role: button;
+    accessible-label: root.description;
+    accessible-enabled: root.enabled;
+    accessible-action-default => { if root.enabled { root.clicked(); } }
+    Tooltip { text: @markdown("\{root.description}"); }
 }
 enum PlayerModifier { none, ctrl, shift }
 struct PlayerKey { modifier: PlayerModifier, key: string }
@@ -138,6 +146,7 @@ export component AppWindow inherits Window {
     private property <length> sidebar-width:root.compact ? 176px : 206px;
     private property <length> player-height:root.compact ? 96px : 110px;
     private property <length> actions-width: (root.compact ? 64px : 86px)
+        + (root.page-has-video ? (root.compact ? 32px : 50px) : 0px)
         + (root.can-download ? (root.compact ? 80px : 88px) : 0px)
         + (root.page-account-actions ? (root.compact ? 64px : 100px) : 0px);
     private property <int> card-columns:root.compact ? 2 : 4;
@@ -159,6 +168,7 @@ export component AppWindow inherits Window {
     in-out property <int> online-index;
     in property <bool> search-page;
     in property <bool> can-download;
+    in property <bool> page-has-video;
     in property <bool> anonymous-source;
     in property <bool> page-account-actions:true;
     in property <[DownloadRow]> downloads;
@@ -169,6 +179,15 @@ export component AppWindow inherits Window {
     callback download-action(int,string);
     callback filter-changed();
     in property <string> download-notice;
+    private property <string> row-notice;
+    notice-timer := Timer {
+        interval: 4s; running: false;
+        triggered => { root.row-notice = ""; self.stop(); }
+    }
+    public function notify-row(message: string) {
+        root.row-notice = message;
+        if notice-timer.running { notice-timer.restart(); } else { notice-timer.start(); }
+    }
     callback online-source(int);
     in property <bool> cards;
     in property <bool> home-page;
@@ -240,6 +259,9 @@ export component AppWindow inherits Window {
         if root.volume-level > 0 { root.last-audible-volume = root.volume-level; }
         root.volume(root.volume-level);
     }
+    public function toggle-mute() {
+        root.set-player-volume(root.volume-level > 0 ? 0 : root.last-audible-volume);
+    }
     callback playlist-create(string);
     callback playlist-manage(string,string);
     callback quality(string);
@@ -284,7 +306,7 @@ export component AppWindow inherits Window {
             return reject;
         }
         VerticalLayout {spacing:0;
-            HorizontalLayout {spacing:0;min-height:0px;vertical-stretch:1;
+            HorizontalLayout {spacing:0;height:root.height - root.player-height;
                 Rectangle {width:root.sidebar-width;background:Theme.dark ? #15151c : #eeebf3;
                     VerticalLayout {padding-top:root.compact ? 16px : 24px;padding-left:18px;padding-right:18px;padding-bottom:root.compact ? 12px : 16px;spacing:root.compact ? 8px : 12px;
                         HorizontalLayout {height:42px;spacing:10px;
@@ -381,7 +403,6 @@ export component AppWindow inherits Window {
                             if root.can-filter: ActionButton {text:"仅看免登录可下载";primary:root.guest-only;clicked=>{root.guest-only=!root.guest-only;root.filter-changed();}}
                             Rectangle {horizontal-stretch:1;}
                         }
-                        if root.download-notice!="": Text {text:root.download-notice;color:Theme.ink;font-size:12px;wrap:word-wrap;}
                         if root.page-tabs.length>0: HorizontalLayout {
                             height:38px;spacing:26px;
                             for tab[i] in root.page-tabs: PageTab {
@@ -429,7 +450,12 @@ export component AppWindow inherits Window {
                             HorizontalLayout {height:24px;padding-left:12px;padding-right:12px;spacing:root.compact ? 8px : 14px;Text {text:"#";width:25px;color:Theme.muted;font-size:11px;}Text {text:"歌曲 / 歌手";min-width:0px;horizontal-stretch:1;color:Theme.muted;font-size:11px;}if !root.compact: Text {text:"专辑";width:130px;color:Theme.muted;font-size:11px;}Text {text:"时长";width:48px;color:Theme.muted;font-size:11px;}Rectangle{width:root.actions-width;}}
                             ScrollView {VerticalLayout {spacing:4px;
                                 for row[i] in root.rows: Rectangle {height:66px;border-radius:10px;background:row-touch.has-hover ? Theme.elevated : i/2==floor(i/2) ? Theme.panel.with-alpha(0.45) : transparent;
-                                    row-touch:=TouchArea {clicked=>{root.row-action(i,"open");}}
+                                    row-touch:=TouchArea {
+                                        x:0px;y:0px;width:max(0px,parent.width - root.actions-width - 10px);height:parent.height;
+                                        enabled:!row.disabled;
+                                        clicked=>{if row.kind != "track" {root.row-action(i,"open");}}
+                                        double-clicked=>{if row.kind == "track" {root.row-action(i,"open");}}
+                                    }
                                     HorizontalLayout {padding:10px;spacing:root.compact ? 8px : 14px;
                                         Text {text:(i+1);width:25px;color:Theme.muted;font-size:11px;vertical-alignment:center;}
                                         Cover {source:row.cover;width:44px;height:44px;border-radius:8px;}
@@ -437,11 +463,42 @@ export component AppWindow inherits Window {
                                         if !root.compact: Text {text:row.album;width:130px;color:Theme.muted;font-size:11px;overflow:elide;vertical-alignment:center;}
                                         Text {text:row.duration;width:48px;color:Theme.muted;font-size:11px;vertical-alignment:center;}
                                         HorizontalLayout {width:root.actions-width;spacing:root.compact ? 4px : 14px;alignment:end;
-                                            IconButton {width:root.compact ? 28px : 36px;icon:@image-url("icons/play.svg");enabled:!row.disabled;clicked=>{root.row-action(i,"open");}}
-                                            IconButton {width:root.compact ? 28px : 36px;icon:@image-url("icons/plus.svg");enabled:!row.disabled;clicked=>{root.row-action(i,"add");}}
-                                            if row.show-download: ActionButton {width:74px;text:row.download-label;enabled:!row.download-blocked;clicked=>{root.row-action(i,"download");}}
-                                            if row.account-actions: IconButton {width:root.compact ? 28px : 36px;icon:@image-url("icons/heart.svg");clicked=>{root.row-action(i,"like");}}
-                                            if row.account-actions: IconButton {width:root.compact ? 28px : 36px;icon:@image-url("icons/close.svg");clicked=>{root.row-action(i,root.local-playlist?"remove":"unlike");}}
+                                            ListIconButton {
+                                                width:root.compact ? 28px : 36px;icon:@image-url("icons/play.svg");enabled:!row.disabled;
+                                                description:row.kind != "track" ? "打开详情" : row.disabled ? "这首歌暂时无法播放" : "播放这首歌";
+                                                clicked=>{root.row-action(i,"open");}
+                                            }
+                                            if row.show-video: ListIconButton {
+                                                width:root.compact ? 28px : 36px;icon:@image-url("icons/video.svg");
+                                                description:"看视频";enabled:!row.disabled;
+                                                clicked=>{root.row-action(i,"video");}
+                                            }
+                                            if row.kind == "track": ListIconButton {
+                                                width:root.compact ? 28px : 36px;icon:@image-url("icons/plus.svg");enabled:!row.disabled;
+                                                description:row.disabled ? "这首歌暂时不可用" : row.resource.starts-with("local:") && root.playlist-index > 0 && root.playlist-index < root.playlist-names.length
+                                                    ? "加入歌单「" + root.playlist-names[root.playlist-index] + "」" : "加入播放队列";
+                                                clicked=>{root.row-action(i,"add");}
+                                            }
+                                            if row.show-download: ActionButton {
+                                                width:74px;text:row.download-label;enabled:!row.download-blocked;
+                                                accessible-role:button;accessible-label:row.download-hint;accessible-enabled:self.enabled;
+                                                accessible-action-default=>{if self.enabled {root.row-action(i,"download");}}
+                                                Tooltip {text:@markdown("\{row.download-hint}");}
+                                                clicked=>{root.row-action(i,"download");}
+                                            }
+                                            if row.account-actions: ListIconButton {
+                                                width:root.compact ? 28px : 36px;active:row.liked;enabled:!row.like-pending;
+                                                icon:row.liked ? @image-url("icons/heart-filled.svg") : @image-url("icons/heart.svg");
+                                                description:row.kind == "album" ? "收藏专辑" : row.like-pending ? "正在更新喜欢状态" : row.liked ? "取消喜欢" : "喜欢这首歌";
+                                                clicked=>{root.row-action(i,row.liked ? "unlike" : "like");}
+                                            }
+                                            if row.account-actions: ListIconButton {
+                                                width:root.compact ? 28px : 36px;icon:@image-url("icons/close.svg");
+                                                enabled:root.local-playlist || row.kind == "album" || (row.liked && !row.like-pending);
+                                                description:row.kind == "album" ? "取消收藏专辑" : root.local-playlist ? "从当前歌单移除" : row.like-pending ? "正在更新喜欢状态"
+                                                    : row.liked ? "从喜欢的歌曲移除" : "这首歌还没加入喜欢";
+                                                clicked=>{root.row-action(i,root.local-playlist ? "remove" : "unlike");}
+                                            }
                                         }
                                     }
                                 }
@@ -509,7 +566,7 @@ export component AppWindow inherits Window {
                             icon: root.volume-level > 0 ? @image-url("icons/volume.svg") : @image-url("icons/volume-muted.svg");
                             active: root.volume-level == 0;
                             label: root.volume-level > 0 ? "静音" : "取消静音"; shortcut: { modifier: ctrl, key: "m" };
-                            activated => { root.set-player-volume(root.volume-level > 0 ? 0 : root.last-audible-volume); }
+                            activated => { root.toggle-mute(); }
                         }
                         Slider {
                             width: root.compact ? 52px : 85px; minimum: 0; maximum: 100; value <=> root.volume-level;
@@ -522,8 +579,22 @@ export component AppWindow inherits Window {
         }
         if root.show-queue: Rectangle {width:300px;height:parent.height - root.player-height;x:parent.width - self.width;y:0px;background:Theme.panel;
                         TouchArea {}
-                        VerticalLayout {padding:18px;spacing:18px;HorizontalLayout {Text {text:"接下来播放";color:Theme.ink;font-size:18px;font-weight:600;horizontal-stretch:1;}IconButton {icon:@image-url("icons/close.svg");clicked=>{root.show-queue=false;}}}Text{text:root.queue.length+" 首歌曲";color:Theme.muted;}
-                            ScrollView {VerticalLayout {spacing:10px;for row[i] in root.queue: Rectangle {height:54px;HorizontalLayout {spacing:8px;Cover {source:row.cover;width:40px;height:40px;border-radius:7px;}Text {text:row.title;color:Theme.ink;font-size:12px;overflow:elide;min-width:0px;horizontal-stretch:1;vertical-alignment:center;}IconButton {icon:@image-url("icons/play.svg");clicked=>{root.queue-action(i,"play");}}IconButton {width:26px;icon:@image-url("icons/close.svg");clicked=>{root.queue-action(i,"remove");}}}}}}
+                        VerticalLayout {padding:18px;spacing:18px;HorizontalLayout {Text {text:"接下来播放";color:Theme.ink;font-size:18px;font-weight:600;horizontal-stretch:1;}ListIconButton {description:"关闭播放队列";icon:@image-url("icons/close.svg");clicked=>{root.show-queue=false;}}}Text{text:root.queue.length+" 首歌曲";color:Theme.muted;}
+                            ScrollView {VerticalLayout {spacing:10px;padding-right:16px;for row[i] in root.queue: Rectangle {
+                                height:54px;
+                                HorizontalLayout {spacing:8px;
+                                    Rectangle {horizontal-stretch:1;min-width:0px;
+                                        HorizontalLayout {spacing:8px;
+                                            Cover {source:row.cover;width:40px;height:40px;border-radius:7px;}
+                                            Text {text:row.title;color:Theme.ink;font-size:12px;overflow:elide;min-width:0px;horizontal-stretch:1;vertical-alignment:center;}
+                                        }
+                                        TouchArea {enabled:!row.disabled;double-clicked=>{root.queue-action(i,"play");}}
+                                    }
+                                    ListIconButton {description:"播放这首歌";icon:@image-url("icons/play.svg");clicked=>{root.queue-action(i,"play");}}
+                                    if row.show-video: ListIconButton {description:"看视频";icon:@image-url("icons/video.svg");enabled:!row.disabled;clicked=>{root.queue-action(i,"video");}}
+                                    ListIconButton {description:"从播放队列移除";width:26px;icon:@image-url("icons/close.svg");clicked=>{root.queue-action(i,"remove");}}
+                                }
+                            }}}
                         }
                     }
         if root.show-downloads: Rectangle {
@@ -555,6 +626,16 @@ export component AppWindow inherits Window {
                     }
                 }}
             }
+        }
+    }
+    if root.row-notice != "": Rectangle {
+        x:(parent.width - self.width)/2;y:parent.height - root.player-height - self.height - 12px;
+        width:min(root.width - 40px, notice-text.preferred-width + 32px, 520px);
+        height:notice-text.preferred-height + 18px;border-radius:10px;
+        background:Theme.elevated;border-width:1px;border-color:Theme.muted.with-alpha(0.4);
+        notice-text := Text {
+            x:16px;width:parent.width - 32px;text:root.row-notice;color:Theme.ink;
+            wrap:word-wrap;horizontal-alignment:center;vertical-alignment:center;
         }
     }
     if root.show-catalog: Rectangle {

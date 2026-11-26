@@ -1,5 +1,6 @@
 mod covers;
 mod download;
+mod preferences;
 mod search;
 #[cfg(windows)]
 mod window_behavior;
@@ -7,12 +8,14 @@ mod workers;
 use anyhow::Result;
 use music_core::*;
 use music_library::Library;
-use music_player::{Command, Player, PlayerEvent};
+use music_player::{Command, Player, PlayerEvent, Video};
 use music_plugin_host::{catalog, manifest};
+use preferences::PlaybackSettings;
 use serde_json::{Value, json};
 use slint::{ComponentHandle, Model, ModelRc, VecModel};
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
+    collections::HashSet,
     path::{Path, PathBuf},
     rc::Rc,
     sync::{
@@ -59,6 +62,9 @@ struct UiState {
     page_links: Vec<Navigation>,
     page_tabs: Vec<Navigation>,
     items: Vec<Item>,
+    liked: HashSet<ResourceKey>,
+    pending_likes: HashSet<ResourceKey>,
+    next_offset: u64,
     queue: Queue,
     last: Request,
     playlists: Vec<Item>,
@@ -70,7 +76,7 @@ struct UiState {
     login_inflight: bool,
     suggest_query: String,
     playing: bool,
-    loaded: bool,
+    loaded: Option<ResourceKey>,
     play_generation: u64,
 }
 fn has_capability(plugins: &[(Manifest, bool)], id: &str, cap: &str) -> bool {
@@ -82,6 +88,9 @@ fn has_capability(plugins: &[(Manifest, bool)], id: &str, cap: &str) -> bool {
 impl UiState {
     fn clear_page(&mut self, ui: &AppWindow) {
         self.items.clear();
+        self.liked.clear();
+        self.pending_likes.clear();
+        self.next_offset = 0;
         self.page_source = self.source.clone();
         self.online = None;
         ui.set_can_filter(false);
@@ -90,6 +99,7 @@ impl UiState {
         ui.set_page_links(ModelRc::default());
         ui.set_page_tabs(ModelRc::default());
         ui.set_rows(ModelRc::default());
+        ui.set_page_has_video(false);
         ui.set_more(false);
         ui.set_next_label("加载更多".into());
         ui.set_search_page(false);
@@ -105,7 +115,7 @@ impl UiState {
             .items
             .iter()
             .map(|item| {
-                let mut result = row(item);
+                let mut result = row(item, &self.plugins);
                 let plugin = self
                     .plugins
                     .iter()
@@ -117,7 +127,12 @@ impl UiState {
                     !m.media.is_empty() && m.capabilities.iter().any(|c| c == "download")
                 });
                 result.show_download = item.kind == "track" && can_download;
-                result.account_actions = plugin.is_none_or(Manifest::supports_likes);
+                result.account_actions = (item.kind == "track" && item.key.source == "local")
+                    || (matches!(item.kind.as_str(), "track" | "album")
+                        && plugin.is_some_and(Manifest::supports_likes));
+                result.liked = item.kind == "track" && self.liked.contains(&item.key);
+                result.like_pending =
+                    item.kind == "track" && self.pending_likes.contains(&item.key);
                 if self.online.is_some()
                     && let Some(m) = plugin
                 {
@@ -147,11 +162,145 @@ impl UiState {
                         Failed(_) => "重试",
                     }
                     .into();
+                    result.download_hint = match phase {
+                        Queued => "已加入下载队列，等待下载".into(),
+                        Active { .. } => "正在下载，可在下载队列查看进度".into(),
+                        Complete => "下载完成，已保存到本地音乐库".into(),
+                        Failed(reason) => format!("下载失败，点击重试 · {reason}").into(),
+                    };
                 }
                 result
             })
             .collect();
-        ui.set_rows(ModelRc::new(VecModel::from(list)));
+        ui.set_page_has_video(list.iter().any(|r| r.show_video));
+        let model = ui.get_rows();
+        if model.row_count() == list.len()
+            && model
+                .iter()
+                .zip(&list)
+                .all(|(a, b)| a.resource == b.resource && a.kind == b.kind)
+        {
+            for (i, next) in list.into_iter().enumerate() {
+                if model.row_data(i).as_ref() != Some(&next) {
+                    model.set_row_data(i, next);
+                }
+            }
+        } else {
+            ui.set_rows(ModelRc::new(VecModel::from(list)));
+        }
+    }
+
+    fn request_likes(
+        &self,
+        jobs: &mpsc::Sender<Job>,
+        generation: &AtomicU64,
+        source: &str,
+        items: &[Item],
+    ) {
+        if source != "local"
+            && !self
+                .plugins
+                .iter()
+                .any(|(m, enabled)| *enabled && m.id == source && m.supports_likes())
+        {
+            return;
+        }
+        let ids: Vec<_> = items
+            .iter()
+            .filter(|item| item.kind == "track" && item.key.source == source)
+            .map(|item| &item.key.id)
+            .collect();
+        for batch in ids.chunks(200) {
+            send(jobs, generation, source, "isLiked", json!({"ids":batch}));
+        }
+    }
+
+    fn refresh_hearts(&self, ui: &AppWindow) {
+        let rows = ui.get_rows();
+        for (i, item) in self.items.iter().enumerate() {
+            if item.kind != "track" {
+                continue;
+            }
+            let liked = self.liked.contains(&item.key);
+            let pending = self.pending_likes.contains(&item.key);
+            if let Some(mut row) = rows.row_data(i)
+                && (row.liked != liked || row.like_pending != pending)
+            {
+                row.liked = liked;
+                row.like_pending = pending;
+                rows.set_row_data(i, row);
+            }
+        }
+    }
+
+    fn remove_visible_track(&mut self, ui: &AppWindow, key: &ResourceKey) {
+        if let Some(i) = self.items.iter().position(|item| item.key == *key) {
+            self.items.remove(i);
+            self.next_offset = self.next_offset.saturating_sub(1);
+            if let Some(rows) = ui.get_rows().as_any().downcast_ref::<VecModel<Row>>() {
+                rows.remove(i);
+            } else {
+                self.update_rows(ui);
+            }
+            ui.set_status(format!("{} 项", self.items.len()).into());
+        }
+    }
+
+    fn finish_row_edit(&mut self, ui: &AppWindow, reply: Reply) {
+        let favorite = reply.op == "like";
+        let key = ResourceKey {
+            source: reply.source,
+            id: reply.args[if favorite { "id" } else { "track" }]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned(),
+        };
+        let title = self
+            .items
+            .iter()
+            .find(|item| item.key == key)
+            .map(|item| format!("《{}》", item.title))
+            .unwrap_or_else(|| "这首歌".into());
+        if favorite {
+            self.pending_likes.remove(&key);
+        }
+        let message = match reply.value {
+            Err(e) => format!("{title}操作失败 · {e}"),
+            Ok(_) if favorite => {
+                if reply.args["on"] == true {
+                    self.liked.insert(key);
+                    format!("已喜欢{title}")
+                } else {
+                    self.liked.remove(&key);
+                    if self.last.op == "liked" {
+                        self.remove_visible_track(ui, &key);
+                    }
+                    format!("已取消喜欢{title}")
+                }
+            }
+            Ok(changed) => {
+                let name = self
+                    .playlists
+                    .iter()
+                    .find(|p| p.key.id == reply.args["id"].as_str().unwrap_or_default())
+                    .map(|p| format!("歌单「{}」", p.title))
+                    .unwrap_or_else(|| "歌单".into());
+                if reply.op == "removeFromPlaylist" {
+                    if self.last.op == "playlist" && self.last.args["id"] == reply.args["id"] {
+                        self.remove_visible_track(ui, &key);
+                    }
+                    format!("{title}已从{name}移除")
+                } else if changed == false {
+                    format!("{title}已在{name}中")
+                } else {
+                    format!("{title}已加入{name}")
+                }
+            }
+        };
+        if favorite {
+            self.refresh_hearts(ui);
+        }
+        ui.invoke_notify_row(message.into());
     }
 
     fn begin_online(&mut self, ui: &AppWindow, jobs: &mpsc::Sender<Job>, genr: &AtomicU64) -> bool {
@@ -220,7 +369,7 @@ fn image_path(path: &str) -> slint::Image {
         slint::Image::default()
     }
 }
-fn row(t: &Item) -> Row {
+fn row(t: &Item, plugins: &[(Manifest, bool)]) -> Row {
     Row {
         title: t.title.clone().into(),
         subtitle: if t.license.is_empty() {
@@ -237,9 +386,18 @@ fn row(t: &Item) -> Row {
             slint::Image::default()
         },
         disabled: t.unavailable,
+        show_video: t.kind == "track" && has_capability(plugins, &t.key.source, "video"),
         show_download: false,
         account_actions: true,
+        liked: false,
+        like_pending: false,
         download_blocked: t.downloadable == Some(false),
+        download_hint: if t.downloadable == Some(false) {
+            "音乐源未开放这首歌的下载"
+        } else {
+            "下载到本地音乐库"
+        }
+        .into(),
         download_label: if t.downloadable == Some(false) {
             "未开放下载"
         } else {
@@ -254,9 +412,6 @@ fn row(t: &Item) -> Row {
         )
         .into(),
     }
-}
-fn rows(items: &[Item]) -> ModelRc<Row> {
-    ModelRc::new(VecModel::from(items.iter().map(row).collect::<Vec<_>>()))
 }
 fn prepare_items(
     items: &mut [Item],
@@ -380,19 +535,32 @@ fn show_page_navigation(ui: &AppWindow, state: &mut UiState, links: Vec<Navigati
     )));
 }
 fn refresh_queue(ui: &AppWindow, state: &UiState) {
-    ui.set_queue(rows(&state.queue.items));
+    ui.set_queue(ModelRc::new(VecModel::from(
+        state
+            .queue
+            .items
+            .iter()
+            .map(|t| row(t, &state.plugins))
+            .collect::<Vec<_>>(),
+    )));
 }
 fn play(
     ui: &AppWindow,
     state: &mut UiState,
     tx: &mpsc::Sender<Job>,
-    generation: &AtomicU64,
     player: &mpsc::Sender<Command>,
     item: Item,
+    video: bool,
 ) {
     state.play_generation += 1;
-    let _ = generation;
-    state.loaded = false;
+    let mut args = json!({"id":item.key.id});
+    if video {
+        args["video"] = json!(true);
+        if state.loaded.as_ref() == Some(&item.key) {
+            args["start"] = json!(ui.get_position());
+        }
+    }
+    state.loaded = None;
     if player.send(Command::Stop).is_err() {
         ui.set_status("播放引擎不可用，请检查 libmpv 路径后重启".into());
         ui.set_playing(false);
@@ -402,7 +570,7 @@ fn play(
     ui.set_playing(false);
     ui.set_now_title(item.title.clone().into());
     ui.set_now_artist(item.subtitle.clone().into());
-    ui.set_now_cover(row(&item).cover);
+    ui.set_now_cover(row(&item, &state.plugins).cover);
     ui.set_lyric("".into());
     ui.set_translated_lyric("".into());
     ui.set_lyrics("".into());
@@ -411,7 +579,7 @@ fn play(
     ui.set_busy(true);
     let _ = tx.send(Job {
         source: item.key.source,
-        request: Request::new("resolve", json!({"id":item.key.id})),
+        request: Request::new("resolve", args),
         generation: state.play_generation,
     });
 }
@@ -445,6 +613,13 @@ pub fn run_at(root: PathBuf) -> Result<()> {
     #[cfg(windows)]
     window_behavior::install(&ui);
     let library = Library::open(&root)?;
+    let initial = PlaybackSettings::read(&library);
+    let preferences = Rc::new(Cell::new(initial));
+    let saved_preferences = Rc::new(Cell::new(initial));
+    ui.invoke_set_player_volume(initial.volume);
+    if initial.muted {
+        ui.invoke_set_player_volume(0.);
+    }
     let restored: Queue = serde_json::from_value(library.get("queue")).unwrap_or_default();
     ui.set_dark(library.get("dark").as_bool().unwrap_or(true));
     ui.set_playback_mode(restored.playback_mode().into());
@@ -463,6 +638,9 @@ pub fn run_at(root: PathBuf) -> Result<()> {
         page_links: vec![],
         page_tabs: vec![],
         items: vec![],
+        liked: HashSet::new(),
+        pending_likes: HashSet::new(),
+        next_offset: 0,
         queue: restored,
         last: Request::new("library", json!({})),
         playlists: vec![],
@@ -474,7 +652,7 @@ pub fn run_at(root: PathBuf) -> Result<()> {
         login_inflight: false,
         suggest_query: String::new(),
         playing: false,
-        loaded: false,
+        loaded: None,
         play_generation: 0,
     }));
     let (tx, rx) = mpsc::channel::<Job>();
@@ -492,7 +670,7 @@ pub fn run_at(root: PathBuf) -> Result<()> {
     );
     workers::Workers {
         root: root.clone(),
-        library,
+        library: library.clone(),
         generation: generation.clone(),
         out: out_tx,
         download_tx,
@@ -646,12 +824,19 @@ pub fn run_at(root: PathBuf) -> Result<()> {
                         && item.downloadable != Some(false)
                         && has_capability(&s.plugins, &item.key.source, "download") =>
                 {
+                    let message = format!("《{}》已加入下载队列", item.title);
                     if s.downloads.enqueue(item) {
+                        ui.invoke_notify_row(message.into());
                         s.schedule_downloads(&ui, &job, &genr);
                     }
                 }
-                "open" if item.kind == "track" && item.unavailable => {}
-                "open" if item.kind == "track" => {
+                "open" | "video" if item.kind == "track" => {
+                    let video = action == "video";
+                    if item.unavailable
+                        || (video && !has_capability(&s.plugins, &item.key.source, "video"))
+                    {
+                        return;
+                    }
                     s.queue.items = s
                         .items
                         .iter()
@@ -660,7 +845,7 @@ pub fn run_at(root: PathBuf) -> Result<()> {
                         .collect();
                     s.queue.index = s.queue.items.iter().position(|t| t.key == item.key);
                     refresh_queue(&ui, &s);
-                    play(&ui, &mut s, &job, &genr, &pc, item);
+                    play(&ui, &mut s, &job, &pc, item, video);
                 }
                 "open" => {
                     genr.fetch_add(1, Ordering::Relaxed);
@@ -676,7 +861,7 @@ pub fn run_at(root: PathBuf) -> Result<()> {
                         s.last.args.clone(),
                     );
                 }
-                "add" => {
+                "add" if item.kind == "track" && !item.unavailable => {
                     if item.key.source == "local"
                         && let Some(p) = ui
                             .get_playlist_index()
@@ -690,7 +875,8 @@ pub fn run_at(root: PathBuf) -> Result<()> {
                             "addToPlaylist",
                             json!({"id":p.key.id,"track":item.key.id}),
                         );
-                    } else if item.kind == "track" && !item.unavailable {
+                    } else {
+                        ui.invoke_notify_row(format!("《{}》已加入播放队列", item.title).into());
                         s.queue.items.push(item);
                         refresh_queue(&ui, &s);
                     }
@@ -703,19 +889,25 @@ pub fn run_at(root: PathBuf) -> Result<()> {
                         "removeFromPlaylist",
                         json!({"id":s.last.args["id"],"track":item.key.id}),
                     );
-                    send(&job, &genr, "local", "playlist", s.last.args.clone());
                 }
-                "like" | "unlike" => {
-                    let op = if item.kind == "album" {
-                        "saveAlbum"
-                    } else {
-                        "like"
-                    };
+                "like" | "unlike" if item.kind == "album" => {
                     send(
                         &job,
                         &genr,
                         &item.key.source,
-                        op,
+                        "saveAlbum",
+                        json!({"id":item.key.id,"on":action=="like"}),
+                    );
+                }
+                "like" | "unlike"
+                    if item.kind == "track" && s.pending_likes.insert(item.key.clone()) =>
+                {
+                    s.refresh_hearts(&ui);
+                    send(
+                        &job,
+                        &genr,
+                        &item.key.source,
+                        "like",
                         json!({"id":item.key.id,"on":action=="like"}),
                     );
                 }
@@ -726,7 +918,6 @@ pub fn run_at(root: PathBuf) -> Result<()> {
     let weak = ui.as_weak();
     let st = state.clone();
     let job = tx.clone();
-    let genr = generation.clone();
     let pc = ptx.clone();
     ui.on_queue_action(move |i, a| {
         if let Some(ui) = weak.upgrade() {
@@ -735,15 +926,19 @@ pub fn run_at(root: PathBuf) -> Result<()> {
                 if s.queue.index == Some(i as usize) {
                     let _ = pc.send(Command::Stop);
                     s.play_generation += 1;
-                    s.loaded = false;
+                    s.loaded = None;
                     s.playing = false;
                     ui.set_playing(false);
                 }
                 s.queue.remove(i as usize);
                 refresh_queue(&ui, &s);
-            } else if let Some(t) = s.queue.items.get(i as usize).cloned() {
+            } else if matches!(a.as_str(), "play" | "video")
+                && let Some(t) = s.queue.items.get(i as usize).cloned()
+                && !t.unavailable
+                && (a != "video" || has_capability(&s.plugins, &t.key.source, "video"))
+            {
                 s.queue.index = Some(i as usize);
-                play(&ui, &mut s, &job, &genr, &pc, t);
+                play(&ui, &mut s, &job, &pc, t, a == "video");
             }
         }
     });
@@ -783,14 +978,14 @@ pub fn run_at(root: PathBuf) -> Result<()> {
         let mut s = st.borrow_mut();
         match a.as_str() {
             "pause" => {
-                if !s.loaded {
+                if s.loaded.is_none() {
                     if let Some(t) = s
                         .queue
                         .index
                         .and_then(|i| s.queue.items.get(i).cloned())
                         .or_else(|| s.queue.advance(false, rand::random()))
                     {
-                        play(&ui, &mut s, &job, &genr, &pc, t);
+                        play(&ui, &mut s, &job, &pc, t, false);
                     }
                 } else {
                     s.playing = !s.playing;
@@ -807,7 +1002,7 @@ pub fn run_at(root: PathBuf) -> Result<()> {
                     s.queue.advance(false, rand::random())
                 };
                 if let Some(t) = item {
-                    play(&ui, &mut s, &job, &genr, &pc, t);
+                    play(&ui, &mut s, &job, &pc, t, false);
                 }
             }
             "cycle-mode" | "shuffle" => {
@@ -829,7 +1024,7 @@ pub fn run_at(root: PathBuf) -> Result<()> {
                 s.queue.index = None;
                 if let Some(t) = s.queue.advance(false, rand::random()) {
                     refresh_queue(&ui, &s);
-                    play(&ui, &mut s, &job, &genr, &pc, t);
+                    play(&ui, &mut s, &job, &pc, t, false);
                 }
             }
             "library" => {
@@ -854,8 +1049,7 @@ pub fn run_at(root: PathBuf) -> Result<()> {
             }
             "more" => {
                 let mut req = s.last.clone();
-                let step = if s.page_source == "local" { 100 } else { 50 };
-                req.args["offset"] = json!(req.args["offset"].as_u64().unwrap_or(0) + step);
+                req.args["offset"] = json!(s.next_offset);
                 ui.set_busy(true);
                 send(&job, &genr, &s.page_source, &req.op, req.args);
             }
@@ -971,7 +1165,7 @@ pub fn run_at(root: PathBuf) -> Result<()> {
                     .is_some_and(|t| t.key.source == m.id)
                 {
                     s.play_generation += 1;
-                    s.loaded = false;
+                    s.loaded = None;
                     s.playing = false;
                     let _ = pc.send(Command::Stop);
                     ui.set_playing(false);
@@ -1040,7 +1234,14 @@ pub fn run_at(root: PathBuf) -> Result<()> {
         let _ = pc.send(Command::Seek(v as f64));
     });
     let pc = ptx.clone();
+    let levels = preferences.clone();
     ui.on_volume(move |v| {
+        let mut settings = levels.get();
+        settings.muted = v <= 0.;
+        if !settings.muted {
+            settings.volume = v;
+        }
+        levels.set(settings);
         let _ = pc.send(Command::Volume(v as f64));
     });
     let debounce = Rc::new(slint::Timer::default());
@@ -1121,6 +1322,9 @@ pub fn run_at(root: PathBuf) -> Result<()> {
     let mut capture_download = std::env::var_os("MUSIC_API_CAPTURE_DOWNLOAD").is_some();
     let mut saved = Instant::now();
     let mut catalog_file: Option<tempfile::NamedTempFile> = None;
+    let settings = preferences.clone();
+    let last_written = saved_preferences.clone();
+    let live_player = player.clone();
     timer.start(
         slint::TimerMode::Repeated,
         Duration::from_millis(100),
@@ -1192,7 +1396,8 @@ pub fn run_at(root: PathBuf) -> Result<()> {
                             None => format!("《{title}》已在本地音乐库"),
                         };
                         if s.downloads.finish(&key, error) {
-                            ui.set_download_notice(message.into());
+                            ui.set_download_notice(message.as_str().into());
+                            ui.invoke_notify_row(message.into());
                             s.schedule_downloads(&ui, &job, &genr);
                             if s.online.is_none()
                                 && s.page_source == "local"
@@ -1221,6 +1426,45 @@ pub fn run_at(root: PathBuf) -> Result<()> {
                 {
                     continue;
                 }
+                if matches!(
+                    reply.op.as_str(),
+                    "like" | "addToPlaylist" | "removeFromPlaylist"
+                ) {
+                    s.finish_row_edit(&ui, reply);
+                    continue;
+                }
+                if reply.op == "isLiked" {
+                    if let Ok(Value::Object(states)) = reply.value {
+                        for (id, value) in states {
+                            let key = ResourceKey {
+                                source: reply.source.clone(),
+                                id,
+                            };
+                            if !s.pending_likes.contains(&key) {
+                                match value.as_bool() {
+                                    Some(true) => {
+                                        s.liked.insert(key);
+                                    }
+                                    Some(false) => {
+                                        s.liked.remove(&key);
+                                    }
+                                    None => {}
+                                }
+                            }
+                        }
+                        s.refresh_hearts(&ui);
+                    }
+                    continue;
+                }
+                if reply.op == "saveAlbum" {
+                    let message = match reply.value {
+                        Ok(_) if reply.args["on"] == true => "已收藏专辑".to_owned(),
+                        Ok(_) => "已取消收藏专辑".to_owned(),
+                        Err(e) => format!("更新专辑收藏失败 · {e}"),
+                    };
+                    ui.invoke_notify_row(message.into());
+                    continue;
+                }
                 if reply.op == "search" && reply.source != "local" && s.online.is_some() {
                     let result = reply
                         .value
@@ -1233,6 +1477,7 @@ pub fn run_at(root: PathBuf) -> Result<()> {
                                 &cover_tx,
                                 reply.generation,
                             );
+                            s.request_likes(&job, &genr, &reply.source, &page.items);
                             page
                         });
                     s.online.as_mut().unwrap().accept(
@@ -1252,7 +1497,9 @@ pub fn run_at(root: PathBuf) -> Result<()> {
                 }
                 if reply.op == "persist-downloads" {
                     if let Err(error) = reply.value {
-                        ui.set_download_notice(format!("下载队列保存失败：{error}").into());
+                        let message = format!("下载队列保存失败 · {error}");
+                        ui.set_download_notice(message.as_str().into());
+                        ui.invoke_notify_row(message.into());
                     }
                     continue;
                 }
@@ -1291,14 +1538,26 @@ pub fn run_at(root: PathBuf) -> Result<()> {
                                 let _ = pc.send(Command::Open {
                                     url: url.into(),
                                     referrer: v["referrer"].as_str().map(str::to_owned),
+                                    video: (reply.args["video"] == true).then(|| Video {
+                                        audio_url: v["audioUrl"].as_str().map(str::to_owned),
+                                        title: ui.get_now_title().to_string(),
+                                        start: reply.args["start"].as_f64().unwrap_or_default(),
+                                        speed: settings.get().video_speed,
+                                        preferred_height: settings.get().video_height,
+                                        qualities: serde_json::from_value(v["qualities"].clone())
+                                            .unwrap_or_default(),
+                                    }),
                                 });
                                 let _ = pc.send(Command::Pause(false));
-                                s.loaded = true;
+                                s.loaded = Some(ResourceKey {
+                                    source: reply.source.clone(),
+                                    id: reply.args["id"].as_str().unwrap_or_default().into(),
+                                });
                                 s.playing = true;
                                 ui.set_playing(true);
                                 let _ = job.send(Job {
                                     source: reply.source,
-                                    request: Request::new("lyrics", reply.args),
+                                    request: Request::new("lyrics", json!({"id":reply.args["id"]})),
                                     generation: reply.generation,
                                 });
                             }
@@ -1338,6 +1597,17 @@ pub fn run_at(root: PathBuf) -> Result<()> {
                         }
                         "account" => {
                             ui.set_account_name(v["name"].as_str().unwrap_or("登录").into());
+                        }
+                        "signOut" => {
+                            s.liked.retain(|key| key.source != reply.source);
+                            if s.last.op == "liked" && s.page_source == reply.source {
+                                s.items.clear();
+                                s.update_rows(&ui);
+                                ui.set_more(false);
+                                ui.set_status("请登录后查看喜欢的歌曲".into());
+                            } else {
+                                s.refresh_hearts(&ui);
+                            }
                         }
                         "settings" => {
                             if reply.source == s.source {
@@ -1381,6 +1651,11 @@ pub fn run_at(root: PathBuf) -> Result<()> {
                                         s.login_key.clear();
                                         ui.set_show_login(false);
                                         send(&job, &genr, &s.source, "account", json!({}));
+                                        if s.last.op == "liked" {
+                                            send(&job, &genr, &s.source, "liked", json!({}));
+                                        } else {
+                                            s.request_likes(&job, &genr, &reply.source, &s.items);
+                                        }
                                     }
                                     _ => {}
                                 }
@@ -1390,6 +1665,8 @@ pub fn run_at(root: PathBuf) -> Result<()> {
                             let old_source = s.source.clone();
                             s.plugins = serde_json::from_value(v).unwrap_or_default();
                             update_plugins(&ui, &mut s);
+                            refresh_queue(&ui, &s);
+                            s.update_rows(&ui);
                             if s.online.is_some() && s.last.op == "search" && s.source == old_source
                             {
                                 genr.fetch_add(1, Ordering::Relaxed);
@@ -1495,6 +1772,19 @@ pub fn run_at(root: PathBuf) -> Result<()> {
                                     reply.generation,
                                 );
                                 ui.set_heading(page.title.into());
+                                if reply.op == "liked" {
+                                    s.liked.extend(
+                                        page.items
+                                            .iter()
+                                            .filter(|t| t.kind == "track")
+                                            .map(|t| t.key.clone()),
+                                    );
+                                } else {
+                                    s.request_likes(&job, &genr, &reply.source, &page.items);
+                                }
+                                s.next_offset = page
+                                    .offset
+                                    .saturating_add(if reply.source == "local" { 100 } else { 50 });
                                 ui.set_has_error(false);
                                 ui.set_more(page.more);
                                 if page.offset > 0 {
@@ -1599,17 +1889,24 @@ pub fn run_at(root: PathBuf) -> Result<()> {
             if queue_covers_changed {
                 refresh_queue(&ui, &s);
             }
-            while let Ok(e) = player.events.try_recv() {
+            while let Ok(e) = live_player.events.try_recv() {
                 match e {
                     PlayerEvent::Ready => {}
+                    PlayerEvent::VideoControl(control) => {
+                        PlaybackSettings::apply_video_control(&settings, &ui, control)
+                    }
                     PlayerEvent::Error(e) => {
                         ui.set_has_error(true);
                         ui.set_status(e.into());
-                        s.loaded = false;
+                        s.loaded = None;
                         s.playing = false;
                         ui.set_playing(false);
                     }
-                    PlayerEvent::Position(p, d) => {
+                    PlayerEvent::Position(p, d, paused) => {
+                        if s.loaded.is_some() && d > 0.0 && s.playing == paused {
+                            s.playing = !paused;
+                            ui.set_playing(!paused);
+                        }
                         if !ui.get_scrubbing() {
                             ui.set_position(p as f32);
                         }
@@ -1642,11 +1939,11 @@ pub fn run_at(root: PathBuf) -> Result<()> {
                         ui.set_translated_lyric(translated.into());
                     }
                     PlayerEvent::Ended => {
-                        s.loaded = false;
+                        s.loaded = None;
                         s.playing = false;
                         ui.set_playing(false);
                         if let Some(t) = s.queue.advance(true, rand::random()) {
-                            play(&ui, &mut s, &job, &genr, &pc, t);
+                            play(&ui, &mut s, &job, &pc, t, false);
                         }
                     }
                 }
@@ -1673,6 +1970,11 @@ pub fn run_at(root: PathBuf) -> Result<()> {
                     "loginPoll",
                     json!({"key":s.login_key}),
                 );
+            }
+            if settings.get() != last_written.get()
+                && let Ok(db) = library.try_lock()
+            {
+                let _ = settings.get().save_changes(&db, &last_written);
             }
             if saved.elapsed() > Duration::from_secs(3) {
                 saved = Instant::now();
@@ -1858,6 +2160,14 @@ pub fn run_at(root: PathBuf) -> Result<()> {
     cancel.store(true, Ordering::Relaxed);
     let s = state.borrow();
     let shutdown_db = Library::open(&root)?;
+    for event in player.events.try_iter() {
+        if let PlayerEvent::VideoControl(control) = event {
+            PlaybackSettings::apply_video_control(&preferences, &ui, control);
+        }
+    }
+    preferences
+        .get()
+        .save_changes(&shutdown_db, &saved_preferences)?;
     shutdown_db.set("queue", json!(s.queue))?;
     shutdown_db.set("download-queue", s.downloads.snapshot())?;
     send(
