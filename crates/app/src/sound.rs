@@ -26,10 +26,12 @@ impl UiState {
         if !self.normalize {
             return Normalization::Off;
         }
-        if matches!(
-            self.queue.playback_mode(),
-            PlaybackMode::Sequential | PlaybackMode::RepeatAll
-        ) && let Some(key) = &self.queue.album_origin
+        if !self.previewing
+            && matches!(
+                self.queue.playback_mode(),
+                PlaybackMode::Sequential | PlaybackMode::RepeatAll
+            )
+            && let Some(key) = &self.queue.album_origin
         {
             return Normalization::Album(
                 serde_json::to_string(key).expect("resource keys are strings"),

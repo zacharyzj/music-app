@@ -20,6 +20,9 @@ pub struct Item {
     pub cover: String,
     pub duration_ms: u64,
     pub unavailable: bool,
+    // Queue entries keep their favorite destination when playback outlives the page.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub use_local_favorites: bool,
     #[serde(skip_serializing)]
     pub heartbeat_recommendation: bool,
     #[serde(skip_serializing_if = "Option::is_none")]

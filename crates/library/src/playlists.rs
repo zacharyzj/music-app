@@ -37,16 +37,32 @@ impl Library {
         let members: Vec<Member> = serde_json::from_str(&data)?;
         let mut local = self
             .db
-            .prepare_cached("SELECT data FROM tracks WHERE id=?1")?;
+            .prepare_cached("SELECT data,path FROM tracks WHERE id=?1")?;
         let mut items = Vec::with_capacity(members.len());
         for member in members {
             match member {
                 Member::Plugin(item) => items.push(*item),
                 Member::Local(id) => {
-                    let row: Option<String> = local.query_row([id], |r| r.get(0)).optional()?;
-                    if let Some(item) = row.and_then(|data| serde_json::from_str(&data).ok()) {
-                        items.push(item);
-                    }
+                    let row: Option<(String, String)> = local
+                        .query_row([&id], |r| Ok((r.get(0)?, r.get(1)?)))
+                        .optional()?;
+                    let item = if let Some((data, path)) = row {
+                        let mut item: Item = serde_json::from_str(&data)?;
+                        item.unavailable |= !Path::new(&path).is_file();
+                        item
+                    } else {
+                        Item {
+                            key: ResourceKey {
+                                source: "local".into(),
+                                id: id.clone(),
+                            },
+                            kind: "track".into(),
+                            title: id,
+                            unavailable: true,
+                            ..Default::default()
+                        }
+                    };
+                    items.push(item);
                 }
             }
         }
@@ -90,16 +106,26 @@ impl Library {
         Ok((id, result))
     }
 
-    pub(super) fn edit_playlist(&mut self, id: &str, key: ResourceKey, add: bool) -> Result<bool> {
+    pub(super) fn edit_playlist(
+        &mut self,
+        id: &str,
+        key: ResourceKey,
+        add: bool,
+        snapshot: Option<Item>,
+    ) -> Result<bool> {
         let (_, changed) = self.change_members(Some(id), "", |members| {
             let index = members.iter().position(|m| m.key() == key);
             match (add, index) {
                 (true, None) => {
-                    ensure!(
-                        key.source == "local" && !key.id.is_empty(),
-                        "本地歌曲编号无效"
-                    );
-                    members.push(Member::Local(key.id));
+                    ensure!(!key.id.is_empty(), "歌曲编号无效");
+                    if key.source == "local" {
+                        members.push(Member::Local(key.id));
+                    } else {
+                        let track = snapshot
+                            .filter(|t| t.kind == "track" && t.key == key)
+                            .context("歌曲来源信息不匹配")?;
+                        members.push(Member::Plugin(Box::new(track)));
+                    }
                 }
                 (false, Some(i)) => {
                     members.remove(i);
@@ -144,31 +170,44 @@ impl Library {
         })
     }
 
-    pub fn replace_unavailable(
+    pub fn replace_playlist_track(
         &mut self,
         id: &str,
         original: &ResourceKey,
         replacement: Item,
+        unavailable_only: bool,
     ) -> Result<()> {
         ensure!(
             replacement.kind == "track"
                 && !replacement.unavailable
                 && !replacement.key.id.is_empty()
                 && !replacement.key.source.is_empty()
-                && replacement.key.source != "local"
                 && replacement.key.source != original.source,
             "请选择其他音乐源中可播放的歌曲"
         );
+        let new_member = if replacement.key.source == "local" {
+            ensure!(
+                !unavailable_only && self.path(&replacement.key.id)?.is_file(),
+                "所选本地文件不可用"
+            );
+            Member::Local(replacement.key.id.clone())
+        } else {
+            Member::Plugin(Box::new(replacement))
+        };
         self.change_members(Some(id), "", |members| {
             let i = members
                 .iter()
-                .position(|m| matches!(m, Member::Plugin(t) if t.key == *original && t.unavailable))
-                .context("原曲已被移除或已恢复可用，请重新打开歌单")?;
-            if let Some(existing) = members.iter().position(|m| m.key() == replacement.key) {
-                members[existing] = Member::Plugin(Box::new(replacement));
+                .position(|m| {
+                    m.key() == *original
+                        && (!unavailable_only || matches!(m, Member::Plugin(t) if t.unavailable))
+                })
+                .context("原曲已变更，请重新打开歌单")?;
+            let new_key = new_member.key();
+            if let Some(existing) = members.iter().position(|m| m.key() == new_key) {
+                members[existing] = new_member;
                 members.remove(i);
             } else {
-                members[i] = Member::Plugin(Box::new(replacement));
+                members[i] = new_member;
             }
             Ok(())
         })?;

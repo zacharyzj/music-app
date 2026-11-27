@@ -42,6 +42,7 @@ impl Library {
         let db = Connection::open(root.join("library.sqlite"))?;
         db.busy_timeout(std::time::Duration::from_secs(5))?;
         db.execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE IF NOT EXISTS kv(key TEXT PRIMARY KEY,value TEXT NOT NULL); CREATE TABLE IF NOT EXISTS tracks(id TEXT PRIMARY KEY,path TEXT UNIQUE NOT NULL,root TEXT NOT NULL,stamp TEXT NOT NULL,data TEXT NOT NULL); CREATE TABLE IF NOT EXISTS liked(id TEXT PRIMARY KEY); CREATE TABLE IF NOT EXISTS playlists(id TEXT PRIMARY KEY,name TEXT NOT NULL,tracks TEXT NOT NULL);")?;
+        db.execute_batch("CREATE TABLE IF NOT EXISTS liked_plugin_tracks(source TEXT NOT NULL,id TEXT NOT NULL,data TEXT NOT NULL,PRIMARY KEY(source,id))")?;
         Ok(Self {
             db,
             root: root.into(),
@@ -315,7 +316,8 @@ impl Library {
             "isLiked" => {
                 let mut lookup = self
                     .db
-                    .prepare_cached("SELECT EXISTS(SELECT 1 FROM liked WHERE id=?1)")?;
+                    .prepare_cached("SELECT CASE WHEN ?2='local' THEN EXISTS(SELECT 1 FROM liked WHERE id=?1) ELSE EXISTS(SELECT 1 FROM liked_plugin_tracks WHERE source=?2 AND id=?1) END")?;
+                let source = a["trackSource"].as_str().unwrap_or("local");
                 let mut result = serde_json::Map::new();
                 for track in a["ids"]
                     .as_array()
@@ -323,13 +325,31 @@ impl Library {
                     .flatten()
                     .filter_map(Value::as_str)
                 {
-                    let liked: bool = lookup.query_row([track], |r| r.get(0))?;
+                    let liked: bool = lookup.query_row([track, source], |r| r.get(0))?;
                     result.insert(track.to_owned(), Value::Bool(liked));
                 }
                 Ok(Value::Object(result))
             }
             "like" => {
-                if a["on"] == true {
+                let source = a["trackSource"].as_str().unwrap_or("local");
+                if source != "local" {
+                    if a["on"] == true {
+                        let track: Item = serde_json::from_value(a["track"].clone())?;
+                        anyhow::ensure!(
+                            track.kind == "track"
+                                && track.key.source == source
+                                && track.key.id == id
+                                && !id.is_empty(),
+                            "歌曲信息不匹配"
+                        );
+                        self.db.execute("INSERT INTO liked_plugin_tracks(source,id,data) VALUES(?1,?2,?3) ON CONFLICT(source,id) DO UPDATE SET data=excluded.data", params![source,id,serde_json::to_string(&track)?])?;
+                    } else {
+                        self.db.execute(
+                            "DELETE FROM liked_plugin_tracks WHERE source=?1 AND id=?2",
+                            params![source, id],
+                        )?;
+                    }
+                } else if a["on"] == true {
                     self.db
                         .execute("INSERT OR IGNORE INTO liked VALUES(?1)", [id])?;
                 } else {
@@ -351,11 +371,17 @@ impl Library {
                     source: a["source"].as_str().unwrap_or("local").into(),
                     id: track,
                 };
-                Ok(json!(self.edit_playlist(
-                    id,
-                    key,
-                    r.op == "addToPlaylist"
-                )?))
+                Ok(json!(
+                    self.edit_playlist(
+                        id,
+                        key,
+                        r.op == "addToPlaylist",
+                        a.get("item")
+                            .cloned()
+                            .map(serde_json::from_value)
+                            .transpose()?,
+                    )?
+                ))
             }
             "deletePlaylist" => {
                 self.db.execute("DELETE FROM playlists WHERE id=?1", [id])?;
@@ -387,6 +413,12 @@ impl Library {
                             .query_map([], |r| r.get(0))?
                             .collect::<std::result::Result<_, _>>()?;
                         tracks.retain(|v| ids.contains(&v.key.id));
+                        let mut saved = self
+                            .db
+                            .prepare("SELECT data FROM liked_plugin_tracks ORDER BY rowid")?;
+                        for data in saved.query_map([], |r| r.get::<_, String>(0))? {
+                            tracks.push(serde_json::from_str(&data?)?);
+                        }
                         title = "喜欢的歌曲".into();
                     }
                     "album" => {

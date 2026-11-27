@@ -88,7 +88,7 @@ fn request(jobs: &mpsc::Sender<Job>, ticket: u64, source: &str, op: &str, args: 
     });
 }
 
-fn labels(values: impl IntoIterator<Item = String>) -> ModelRc<slint::SharedString> {
+pub(super) fn labels(values: impl IntoIterator<Item = String>) -> ModelRc<slint::SharedString> {
     ModelRc::new(VecModel::from(
         values.into_iter().map(Into::into).collect::<Vec<_>>(),
     ))
@@ -208,10 +208,11 @@ impl UiState {
     }
 
     fn close_import(&mut self, ui: &AppWindow, jobs: &mpsc::Sender<Job>, generation: &AtomicU64) {
+        let details = ui.get_import_step() == ImportStep::Details;
         ui.set_import_step(ImportStep::Closed);
         let completed = std::mem::take(&mut self.import);
         self.import.ticket = completed.ticket.wrapping_add(1);
-        if !completed.destination.is_empty() {
+        if !details && !completed.destination.is_empty() {
             self.open_source(
                 ui,
                 jobs,
@@ -228,6 +229,48 @@ impl UiState {
                 .into(),
             );
         }
+    }
+
+    pub(super) fn open_track_details(
+        &mut self,
+        ui: &AppWindow,
+        jobs: &mpsc::Sender<Job>,
+        item: Item,
+    ) {
+        let Some(id) = self.last.args["id"].as_str() else {
+            return;
+        };
+        self.import = Import {
+            ticket: self.import.ticket.wrapping_add(1),
+            destination: id.to_owned(),
+            missing: VecDeque::from([item]),
+            ..Default::default()
+        };
+        ui.set_import_busy(false);
+        ui.set_import_step(ImportStep::Details);
+        self.show_track_details(ui, jobs);
+    }
+
+    fn show_track_details(&mut self, ui: &AppWindow, jobs: &mpsc::Sender<Job>) {
+        let Some(t) = self.import.missing.front() else {
+            return;
+        };
+        let available = unavailable_reason(t, &self.plugins).unwrap_or("可用");
+        let display = row(t, &self.plugins);
+        ui.set_track_details(TrackDetails {
+            title: display.title,
+            cover: display.cover,
+            duration: display.duration,
+            artist: t.artist.as_str().into(),
+            album: t.album.as_str().into(),
+            source: self.source_name(&t.key.source).into(),
+            resource_id: t.key.id.as_str().into(),
+            availability: available.into(),
+            playable: !display.disabled,
+        });
+        ui.set_import_query(format!("{} {}", t.title, t.artist).trim().into());
+        self.import.search = None;
+        self.search_replacements(ui, jobs);
     }
 
     fn start_matching(&mut self, ui: &AppWindow, jobs: &mpsc::Sender<Job>, generation: &AtomicU64) {
@@ -256,59 +299,78 @@ impl UiState {
         let Some(original) = self.import.missing.front() else {
             return;
         };
-        self.import.ticket = self.import.ticket.wrapping_add(1);
-        self.import.query = ui.get_import_query().trim().to_owned();
-        ui.set_import_candidates(ModelRc::default());
-        ui.set_import_more(false);
-        self.import.search = search::Search::new(&self.plugins, "local", "track");
-        if let Some(search) = &mut self.import.search {
-            search.sources.retain(|s| s.id != original.key.source);
-        }
-        if self
+        let details = ui.get_import_step() == ImportStep::Details;
+        let previous = self
             .import
             .search
             .as_ref()
-            .is_none_or(|s| s.sources.is_empty())
-        {
-            ui.set_import_status("没有其他已启用的音乐源，可保留原曲并继续".into());
-        } else if self.import.query.is_empty() {
-            ui.set_import_status("请输入要查找的曲名或歌手".into());
+            .and_then(|s| s.selected.and_then(|i| s.sources.get(i)));
+        let mut search = search::Search::replacements(&self.plugins, &original.key.source, details);
+        search.selected =
+            previous.and_then(|old| search.sources.iter().position(|s| s.id == old.id));
+        let first = if details && ui.get_track_details().playable {
+            format!("{}（当前）", self.source_name(&original.key.source))
+        } else if details {
+            "全部可选来源".into()
         } else {
-            self.more_replacements(ui, jobs);
-        }
+            "全部来源".into()
+        };
+        ui.set_import_filter_sources(labels(
+            std::iter::once(first).chain(search.sources.iter().map(|s| s.name.clone())),
+        ));
+        ui.set_import_filter_index(search.selected.map_or(0, |i| i as i32 + 1));
+        self.import.ticket = self.import.ticket.wrapping_add(1);
+        self.import.query = ui.get_import_query().trim().to_owned();
+        self.import.search = Some(search);
+        self.request_replacements(ui, jobs, true);
     }
 
-    fn more_replacements(&mut self, ui: &AppWindow, jobs: &mpsc::Sender<Job>) {
+    fn request_replacements(&mut self, ui: &AppWindow, jobs: &mpsc::Sender<Job>, first_only: bool) {
         let Some(search) = &mut self.import.search else {
             return;
         };
-        ui.set_import_more(false);
-        ui.set_import_status("正在其他已启用的音乐源中查找…".into());
-        for (source, offset) in search.requests(false) {
-            request(
-                jobs,
-                self.import.ticket,
-                &source,
-                "import-search",
-                json!({"kind":"track","query":self.import.query,"offset":offset}),
-            );
+        if !self.import.query.is_empty() && ui.get_choosing_version() {
+            let pages = if first_only {
+                search.first_requests()
+            } else {
+                search.requests(false)
+            };
+            for (source, offset) in pages {
+                request(
+                    jobs,
+                    self.import.ticket,
+                    &source,
+                    "import-search",
+                    json!({"kind":"track","query":self.import.query,"offset":offset}),
+                );
+            }
         }
+        self.show_candidates(ui);
     }
 
     fn show_candidates(&self, ui: &AppWindow) {
         let Some(search) = &self.import.search else {
             return;
         };
+        if !ui.get_choosing_version() {
+            ui.set_import_candidates(ModelRc::default());
+            ui.set_import_more(false);
+            ui.set_import_status(
+                if search.sources.is_empty() {
+                    "没有其他可切换的来源"
+                } else {
+                    ""
+                }
+                .into(),
+            );
+            return;
+        }
         let rows = search
-            .items
-            .iter()
+            .visible(false)
             .map(|track| {
-                let source = self
-                    .plugins
-                    .iter()
-                    .find(|(m, _)| m.id == track.key.source)
-                    .map_or(track.key.source.as_str(), |(m, _)| m.name.as_str());
+                let source = self.source_name(&track.key.source);
                 ImportCandidate {
+                    resource: resource_label(&track.key),
                     title: track.title.clone().into(),
                     detail: [source, &track.artist, &track.album]
                         .into_iter()
@@ -319,12 +381,17 @@ impl UiState {
                 }
             })
             .collect::<Vec<_>>();
-        let mut status = if rows.is_empty() && search.pending(false) == 0 {
-            "没有找到可用版本，可修改关键词或跳过".to_owned()
+        let pending = search.pending(false);
+        let mut status = if search.sources.is_empty() {
+            "没有其他已启用的音乐源，可保留原曲并继续".to_owned()
+        } else if self.import.query.is_empty() {
+            "请输入要查找的曲名或歌手".to_owned()
+        } else if rows.is_empty() && pending == 0 {
+            "没有找到可用版本，可修改关键词或切换来源".to_owned()
         } else {
             format!("{} 个可选版本", rows.len())
         };
-        if search.pending(false) != 0 {
+        if pending != 0 {
             status.push_str(" · 搜索中");
         }
         for error in search.errors(false) {
@@ -332,7 +399,7 @@ impl UiState {
         }
         ui.set_import_status(status.into());
         ui.set_import_candidates(ModelRc::new(VecModel::from(rows)));
-        ui.set_import_more(search.more(false) && search.pending(false) == 0);
+        ui.set_import_more(!self.import.query.is_empty() && search.more(false) && pending == 0);
     }
 
     pub(super) fn finish_import_reply(
@@ -448,6 +515,22 @@ impl UiState {
                     ui.set_import_step(ImportStep::Confirm);
                 }
             }
+            "import-change-source" => {
+                if let Ok(track) = serde_json::from_value::<Item>(reply.args["track"].clone()) {
+                    self.import.missing = VecDeque::from([track]);
+                    self.show_track_details(ui, jobs);
+                }
+                if ui.get_local_playlist() && self.last.args["id"] == self.import.destination {
+                    send(
+                        jobs,
+                        generation,
+                        "local",
+                        "playlist",
+                        json!({"id":self.import.destination}),
+                    );
+                }
+                ui.invoke_notify_row("已更新这张本地歌单的歌曲来源".into());
+            }
             "import-replace" => {
                 self.import.replaced += 1;
                 self.import.missing.pop_front();
@@ -462,6 +545,7 @@ pub(super) fn install(
     ui: &AppWindow,
     state: Rc<RefCell<UiState>>,
     jobs: mpsc::Sender<Job>,
+    player: mpsc::Sender<Command>,
     generation: Arc<AtomicU64>,
 ) {
     let weak = ui.as_weak();
@@ -503,18 +587,40 @@ pub(super) fn install(
                 }
             }
             (ImportStep::Confirm, "match") => s.start_matching(&ui, &jobs, &generation),
-            (ImportStep::Matching, "search") => s.search_replacements(&ui, &jobs),
-            (ImportStep::Matching, "more") => s.more_replacements(&ui, &jobs),
+            (ImportStep::Matching | ImportStep::Details, "search") => {
+                s.search_replacements(&ui, &jobs)
+            }
+            (ImportStep::Matching | ImportStep::Details, "more") => {
+                s.request_replacements(&ui, &jobs, false)
+            }
+            (ImportStep::Matching | ImportStep::Details, "filter") => {
+                let Some(search) = &mut s.import.search else {
+                    return;
+                };
+                if !(0..=search.sources.len() as i32).contains(&index) {
+                    return;
+                }
+                search.selected = (index > 0).then(|| (index - 1) as usize);
+                ui.set_import_filter_index(index);
+                if ui.get_import_query().trim() == s.import.query {
+                    s.request_replacements(&ui, &jobs, true);
+                } else {
+                    s.search_replacements(&ui, &jobs);
+                }
+            }
             (ImportStep::Matching, "skip") => {
                 s.import.missing.pop_front();
                 s.start_matching(&ui, &jobs, &generation);
             }
-            (ImportStep::Matching, "choose") => {
+            (step @ (ImportStep::Matching | ImportStep::Details), "preview" | "choose") => {
+                if !ui.get_choosing_version() {
+                    return;
+                }
                 let Some(track) = s
                     .import
                     .search
                     .as_ref()
-                    .and_then(|s| s.items.get(index as usize))
+                    .and_then(|s| s.visible(false).nth(index as usize))
                 else {
                     return;
                 };
@@ -524,13 +630,31 @@ pub(super) fn install(
                 if track.key.source == original.key.source || !playable(track, &s.plugins) {
                     return;
                 }
+                if action == "preview" {
+                    if s.previewing && s.loaded.as_ref() == Some(&track.key) {
+                        s.toggle_pause(&ui, &player);
+                    } else {
+                        let preview = ui.get_version_preview();
+                        if preview.loading && preview.resource == resource_label(&track.key) {
+                            return;
+                        }
+                        let mut item = track.clone();
+                        item.use_local_favorites = item.key.source != "local";
+                        play(&ui, &mut s, &jobs, &player, item, PlayKind::Preview);
+                    }
+                    return;
+                }
                 ui.set_import_busy(true);
                 ui.set_import_status("正在保存选定的版本…".into());
                 request(
                     &jobs,
                     s.import.ticket,
                     "local",
-                    "import-replace",
+                    if step == ImportStep::Details {
+                        "import-change-source"
+                    } else {
+                        "import-replace"
+                    },
                     json!({"id":s.import.destination,"original":original.key,"track":track}),
                 );
             }

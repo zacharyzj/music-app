@@ -68,12 +68,13 @@ fn imports_with_installed_plugins_and_only_replaces_after_manual_selection() -> 
                 ? [{id:'lost',name:'Lost',artists:[{name:'Singer'}],unavailable:true}]
                 : [{id:'same',name:'Original'}]};
         }
-        export function search({kind,query}) { return {tracks:query==='Lost Singer' && kind==='tracks'
-            ? [{id:'same',name:'Other version'},{id:'bad',name:'Gone',unavailable:true}] : []}; }
+        export function search({kind,query,offset}) { return {more:!offset && query==='Lost Singer',tracks:['Lost Singer','Other version'].includes(query) && kind==='tracks'
+            ? [{id:offset?'later':'same',name:'Other version'},{id:'bad',name:'Gone',unavailable:true}] : []}; }
         export function stream({id}) {return {url:'https://media.example/'+id};}
     "#;
     for (id, caps) in [
         ("original", json!([])),
+        ("another", json!(["tracksOnly"])),
         ("other", json!(["tracksOnly"])),
         ("off", json!([])),
     ] {
@@ -107,7 +108,14 @@ fn imports_with_installed_plugins_and_only_replaces_after_manual_selection() -> 
         plugins,
     )));
     update_plugins(&ui, &mut state.borrow_mut());
-    install(&ui, state.clone(), jobs.clone(), genr.clone());
+    let (commands, player_commands) = mpsc::channel();
+    install(
+        &ui,
+        state.clone(),
+        jobs.clone(),
+        commands.clone(),
+        genr.clone(),
+    );
     let receive = |op: &str| -> Result<Reply> {
         loop {
             let reply = replies.recv_timeout(Duration::from_secs(10))?;
@@ -174,8 +182,44 @@ fn imports_with_installed_plugins_and_only_replaces_after_manual_selection() -> 
     finish("import-playlist")?;
     ui.window().take_snapshot()?;
     crate::test_ui::click(ui.window(), 550., 310.);
-    finish("import-search")?;
+    assert_eq!(
+        ui.get_import_filter_sources().iter().collect::<Vec<_>>(),
+        ["全部来源", "another", "other"]
+    );
+    assert_eq!(ui.get_import_filter_index(), 0);
+    let mut first = [receive("import-search")?, receive("import-search")?];
+    first.sort_by(|a, b| a.source.cmp(&b.source));
+    let [another, other] = first;
+    state
+        .borrow_mut()
+        .finish_import_reply(&ui, &jobs, &genr, another);
+    action("filter", 2);
+    assert_eq!(ui.get_import_candidates().row_count(), 0);
+    assert!(ui.get_import_status().contains("搜索中"));
+    state
+        .borrow_mut()
+        .finish_import_reply(&ui, &jobs, &genr, other);
+    action("filter", 0);
+    assert_eq!(ui.get_import_candidates().row_count(), 2);
+    action("filter", 2);
     assert_eq!(ui.get_import_candidates().row_count(), 1);
+    assert!(ui.get_import_more());
+    action("more", 0);
+    let next = receive("import-search")?;
+    assert_eq!(next.source, "other");
+    assert!(next.args["offset"].as_u64().unwrap() > 0);
+    state
+        .borrow_mut()
+        .finish_import_reply(&ui, &jobs, &genr, next);
+    assert_eq!(ui.get_import_candidates().row_count(), 2);
+    action("filter", 1);
+    ui.set_import_query("Other version".into());
+    action("search", 0);
+    finish("import-search")?;
+    assert_eq!(ui.get_import_filter_index(), 1);
+    assert_eq!(ui.get_import_candidates().row_count(), 1);
+    action("filter", 2);
+    finish("import-search")?;
     assert!(
         ui.get_import_candidates()
             .row_data(0)
@@ -185,7 +229,69 @@ fn imports_with_installed_plugins_and_only_replaces_after_manual_selection() -> 
     );
     assert!(saved()?[1].unavailable);
     ui.window().take_snapshot()?;
-    crate::test_ui::click(ui.window(), 550., 198.);
+    let original = saved()?[0].clone();
+    {
+        let mut s = state.borrow_mut();
+        s.normalize = true;
+        s.queue.items = vec![
+            original.clone(),
+            Item {
+                title: "Up next".into(),
+                key: ResourceKey {
+                    source: "local".into(),
+                    id: "next".into(),
+                },
+                kind: "track".into(),
+                ..Default::default()
+            },
+        ];
+        s.queue.index = Some(0);
+        s.queue.album_origin = Some(original.key.clone());
+    }
+    let previous_queue = json!(state.borrow().queue);
+    crate::test_ui::click(ui.window(), 530., 198.);
+    let first = receive("resolve")?;
+    assert_eq!(first.source, "other");
+    assert_eq!(first.value.unwrap()["url"], "https://media.example/same");
+    assert!(ui.get_version_preview().loading);
+    assert!(!ui.get_import_busy());
+    assert!(matches!(player_commands.try_recv()?, Command::Stop));
+    action("preview", 0);
+    assert_eq!(state.borrow().play_generation, first.generation);
+    action("filter", 1);
+    action("preview", 0);
+    let second = receive("resolve")?;
+    assert_eq!(second.source, "another");
+    assert!(second.generation > first.generation);
+    assert_eq!(ui.get_version_preview().resource, "another:same");
+    assert!(matches!(player_commands.try_recv()?, Command::Stop));
+    {
+        let mut s = state.borrow_mut();
+        let track = s.now_playing.as_ref().unwrap();
+        assert!(track.use_local_favorites);
+        assert_eq!(s.normalization(), music_player::Normalization::Track);
+        let key = track.key.clone();
+        s.stream_started(&ui, key);
+    }
+    assert!(!ui.get_version_preview().loading);
+    action("preview", 0);
+    assert!(matches!(player_commands.try_recv()?, Command::Pause(true)));
+    assert!(!ui.get_playing());
+    action("preview", 0);
+    assert!(matches!(player_commands.try_recv()?, Command::Pause(false)));
+    assert!(ui.get_playing());
+    state.borrow_mut().playback_ended(&ui, &jobs, &commands);
+    assert!(!ui.get_playing());
+    assert!(ui.get_version_preview().resource.is_empty());
+    assert_eq!(json!(state.borrow().queue), previous_queue);
+    assert!(matches!(
+        state.borrow().normalization(),
+        music_player::Normalization::Album(_)
+    ));
+    assert!(saved()?[1].unavailable);
+    action("filter", 2);
+    ui.window().take_snapshot()?;
+    crate::test_ui::click(ui.window(), 577., 198.);
     finish("import-replace")?;
     assert_eq!(ui.get_import_step(), ImportStep::Closed);
     assert_eq!(library.lock().unwrap().playlist_choices()?.len(), 1);
@@ -204,8 +310,14 @@ fn imports_with_installed_plugins_and_only_replaces_after_manual_selection() -> 
     s.items = items.clone();
     s.replace_queue_from_page();
     assert_eq!(s.queue.items.len(), 2);
-    let (commands, _keep_player) = mpsc::channel();
-    play(&ui, &mut s, &jobs, &commands, items[1].clone(), false);
+    play(
+        &ui,
+        &mut s,
+        &jobs,
+        &commands,
+        items[1].clone(),
+        PlayKind::Audio,
+    );
     let resolved = receive("resolve")?;
     assert_eq!(resolved.source, "other");
     assert_eq!(resolved.value.unwrap()["url"], "https://media.example/same");
@@ -215,7 +327,14 @@ fn imports_with_installed_plugins_and_only_replaces_after_manual_selection() -> 
     s.update_rows(&ui);
     assert!(ui.get_rows().row_data(1).unwrap().disabled);
     let (unexpected, dispatch) = mpsc::channel();
-    play(&ui, &mut s, &unexpected, &commands, items[1].clone(), false);
+    play(
+        &ui,
+        &mut s,
+        &unexpected,
+        &commands,
+        items[1].clone(),
+        PlayKind::Audio,
+    );
     assert!(dispatch.try_recv().is_err());
     s.queue.index = Some(0);
     assert!(s.advance_available(true).is_none());
@@ -224,5 +343,70 @@ fn imports_with_installed_plugins_and_only_replaces_after_manual_selection() -> 
     s.plugins[index].1 = true;
     s.update_rows(&ui);
     assert!(!ui.get_rows().row_data(1).unwrap().disabled);
+    s.last = Request::new("playlist", json!({"id":dest.key.id}));
+    ui.set_local_playlist(true);
+    s.open_track_details(&ui, &jobs, items[1].clone());
+    drop(s);
+    assert_eq!(ui.get_import_step(), ImportStep::Details);
+    assert_eq!(ui.get_track_details().source, "other");
+    let choices = ui.get_import_filter_sources().iter().collect::<Vec<_>>();
+    assert_eq!(
+        choices,
+        ["other（当前）", "本地音乐", "another", "original"]
+    );
+    action("filter", 2);
+    finish("import-search")?;
+    action("preview", 0);
+    let preview = receive("resolve")?;
+    assert_eq!(preview.source, "another");
+    assert_eq!(preview.args["id"], "same");
+    assert_eq!(saved()?[1].key.source, "other");
+    action("filter", 0);
+    assert_eq!(ui.get_import_candidates().row_count(), 0);
+    action("preview", 0);
+    assert_eq!(state.borrow().play_generation, preview.generation);
+    action("choose", 0);
+    assert!(!ui.get_import_busy());
+    action("filter", 2);
+    action("choose", 0);
+    finish("import-change-source")?;
+    assert_eq!(ui.get_import_step(), ImportStep::Details);
+    assert_eq!(ui.get_track_details().source, "another");
+    assert_eq!(ui.get_import_filter_index(), 0);
+    assert_eq!(saved()?[1].key.source, "another");
+    assert!(!ui.get_choosing_version());
+    action("close", 0);
+
+    // A disabled source opens the alternatives immediately, using the saved song as the query.
+    let mut s = state.borrow_mut();
+    s.plugins
+        .iter_mut()
+        .find(|(p, _)| p.id == "another")
+        .unwrap()
+        .1 = false;
+    s.open_track_details(&ui, &jobs, saved()?[1].clone());
+    drop(s);
+    assert!(ui.get_choosing_version());
+    assert_eq!(ui.get_import_filter_index(), 0);
+    assert_eq!(
+        ui.get_import_filter_sources().iter().collect::<Vec<_>>(),
+        ["全部可选来源", "本地音乐", "original", "other"]
+    );
+    for _ in 0..3 {
+        finish("import-search")?;
+    }
+    let versions = ui.get_import_candidates();
+    assert_eq!(versions.row_count(), 2);
+    let other = versions
+        .iter()
+        .position(|v| v.resource == "other:same")
+        .unwrap() as i32;
+    assert_eq!(saved()?[1].key.source, "another");
+    action("choose", other);
+    finish("import-change-source")?;
+    assert_eq!(saved()?[1].key.source, "other");
+    assert!(!ui.get_choosing_version());
+    action("close", 0);
+    assert_eq!(ui.get_import_step(), ImportStep::Closed);
     Ok(())
 }

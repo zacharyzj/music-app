@@ -194,6 +194,7 @@ fn item(x: &Value, kind: &str) -> Item {
         album: text(album, "name"),
         artist,
         heartbeat_recommendation: false,
+        use_local_favorites: false,
         unavailable: x["privilege"]["st"].as_i64().is_some_and(|n| n < 0)
             || x["noCopyrightRcmd"].is_object(),
     }

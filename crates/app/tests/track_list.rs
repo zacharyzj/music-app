@@ -1,6 +1,6 @@
 mod support;
-use music_app_ui::{AppWindow, Row};
-use slint::platform::WindowEvent;
+use music_app_ui::{AppWindow, Row, TrackDownloadState};
+use slint::platform::{Key, WindowEvent};
 use slint::{ComponentHandle, LogicalPosition, Model, PhysicalSize, VecModel};
 use std::{cell::RefCell, rc::Rc};
 use support::{click, test_clock};
@@ -14,6 +14,9 @@ fn scrolled_track_actions_and_tooltips() -> anyhow::Result<()> {
     window.dispatch_event(WindowEvent::WindowActiveChanged(true));
     ui.set_can_download(true);
     ui.set_page_account_actions(true);
+    ui.set_playlist_filter_sources(
+        ["全部来源".into(), "仅看无源".into(), "本地音乐".into()].into(),
+    );
     let tracks = Rc::new(VecModel::from(
         (1..=100)
             .map(|i| Row {
@@ -22,7 +25,6 @@ fn scrolled_track_actions_and_tooltips() -> anyhow::Result<()> {
                 title: format!("歌曲 {i}").into(),
                 account_actions: true,
                 show_download: true,
-                download_label: "下载".into(),
                 download_hint: "下载到本地音乐库".into(),
                 ..Default::default()
             })
@@ -34,8 +36,8 @@ fn scrolled_track_actions_and_tooltips() -> anyhow::Result<()> {
     ui.on_row_action(move |i, action| log.borrow_mut().push((i, action.to_string())));
 
     for (w, h, y, buttons, gap) in [
-        (1240, 820, 210., [951., 1001., 1069., 1138., 1188.], 1027.),
-        (720, 480, 196., [505., 541., 594., 650., 681.], 554.),
+        (1240, 820, 210., [988., 1038., 1088., 1138., 1188.], 1063.),
+        (720, 480, 196., [552., 584., 616., 648., 680.], 600.),
     ] {
         window.set_size(PhysicalSize::new(w, h));
         window.take_snapshot()?;
@@ -57,7 +59,7 @@ fn scrolled_track_actions_and_tooltips() -> anyhow::Result<()> {
         ui.set_local_playlist(false);
         advance(400);
         window.take_snapshot()?;
-        let check = |x, expected: Option<&str>| {
+        let check_at = |x, y, expected: Option<&str>| {
             click(window, x, y);
             // ScrollView defers pointer dispatch while it distinguishes a click from a drag.
             advance(160);
@@ -67,6 +69,7 @@ fn scrolled_track_actions_and_tooltips() -> anyhow::Result<()> {
                 .collect();
             assert_eq!(events.take(), expected, "click at {x}, {y} in width {w}");
         };
+        let check = |x, expected| check_at(x, y, expected);
         let title_x = if w == 1240 { 370. } else { 310. };
         check(title_x, None);
         click(window, title_x, y + 70.);
@@ -87,6 +90,40 @@ fn scrolled_track_actions_and_tooltips() -> anyhow::Result<()> {
             check(x, action);
         }
         check(gap, None);
+        window.dispatch_event(WindowEvent::PointerExited);
+        advance(600);
+        let download_icon = || -> anyhow::Result<Vec<_>> {
+            let frame = window.take_snapshot()?;
+            let x = buttons[2] as usize;
+            Ok(frame
+                .as_slice()
+                .chunks_exact(w as usize)
+                .skip(y as usize - 12)
+                .take(24)
+                .flat_map(|line| line[x - 12..x + 12].iter().copied())
+                .collect())
+        };
+        let mut icons = vec![download_icon()?];
+        for (phase, blocked) in [
+            (TrackDownloadState::Queued, true),
+            (TrackDownloadState::Downloading, true),
+            (TrackDownloadState::Saved, true),
+            (TrackDownloadState::Retry, false),
+        ] {
+            row.download_state = phase;
+            row.download_blocked = blocked;
+            tracks.set_row_data(index, row.clone());
+            let icon = download_icon()?;
+            assert!(
+                !icons.contains(&icon),
+                "download icon for {phase:?} in width {w}"
+            );
+            icons.push(icon);
+            check(buttons[2], (!blocked).then_some("download"));
+            window.dispatch_event(WindowEvent::PointerExited);
+            advance(600);
+        }
+        row.download_state = TrackDownloadState::Ready;
         row.liked = true;
         row.download_blocked = true;
         row.download_hint = "音乐源未开放这首歌的下载".into();
@@ -97,7 +134,40 @@ fn scrolled_track_actions_and_tooltips() -> anyhow::Result<()> {
         check(buttons[4], Some("unlike"));
         ui.set_local_playlist(true);
         window.take_snapshot()?;
-        check(buttons[4], Some("remove"));
+        let local_y = y + if w == 1240 { 50. } else { 44. };
+        let detail_x = buttons[3];
+        check_at(title_x, local_y, None);
+        check_at(title_x, local_y, Some("open"));
+        check_at(detail_x, local_y, Some("details"));
+        check_at(buttons[4], local_y, Some("remove"));
+        let toolbar_y = y - 40.;
+        click(window, w as f32 - 220., toolbar_y);
+        window.dispatch_event(WindowEvent::KeyPressed { text: "m".into() });
+        window.dispatch_event(WindowEvent::KeyReleased { text: "m".into() });
+        assert_eq!(ui.get_playlist_query(), "m");
+        ui.set_playlist_query("".into());
+        for (key, expected) in [(Key::DownArrow, 1), (Key::UpArrow, 0)] {
+            click(window, w as f32 - 48., toolbar_y);
+            advance(160);
+            for key in [key, Key::Return] {
+                window.dispatch_event(WindowEvent::KeyPressed { text: key.into() });
+                window.dispatch_event(WindowEvent::KeyReleased { text: key.into() });
+            }
+            assert_eq!(ui.get_playlist_filter_index(), expected);
+        }
+        let mut unavailable = tracks.row_data(index).unwrap();
+        unavailable.disabled = true;
+        tracks.set_row_data(index, unavailable.clone());
+        window.take_snapshot()?;
+        check_at(title_x, local_y, Some("details"));
+        check_at(detail_x, local_y, Some("details"));
+        ui.set_local_playlist(false);
+        window.take_snapshot()?;
+        check(title_x, None);
+        check(title_x, None);
+        unavailable.disabled = false;
+        tracks.set_row_data(index, unavailable);
+        window.take_snapshot()?;
         let neighbor = tracks.row_data(index + 1).unwrap();
         let mut album = neighbor.clone();
         album.kind = "album".into();

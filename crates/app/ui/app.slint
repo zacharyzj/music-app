@@ -1,13 +1,16 @@
 import { Palette, LineEdit, ComboBox, Slider, ScrollView, CheckBox } from "std-widgets.slint";
-export struct Row {resource:string,title:string,subtitle:string,album:string,duration:string,kind:string,cover:image,disabled:bool,recommended:bool,show-video:bool,download-blocked:bool,download-label:string,download-hint:string,show-download:bool,account-actions:bool,liked:bool,like-pending:bool}
+export enum TrackDownloadState { ready, queued, downloading, saved, retry }
+export struct Row {resource:string,title:string,subtitle:string,album:string,duration:string,kind:string,cover:image,disabled:bool,recommended:bool,show-video:bool,download-blocked:bool,download-state:TrackDownloadState,download-hint:string,show-download:bool,account-actions:bool,liked:bool,like-pending:bool}
 export struct PluginRow { name: string, permissions: string, enabled: bool }
 export struct CatalogRow { title: string, description: string, permissions: string, action-label: string, can-install: bool }
 export struct DownloadRow { title:string, artist:string, status:string, fraction:float, active:bool, failed:bool }
 export struct Nav {title:string}
 export enum PlayerMode { sequential, repeat-all, repeat-one, shuffle, heartbeat }
 export enum FavoriteState { no-track, unsupported, checking, retry, unliked, liked, adding, removing }
-export enum ImportStep { closed, form, confirm, matching }
-export struct ImportCandidate { title: string, detail: string }
+export enum ImportStep { closed, form, confirm, matching, details }
+struct TrackDetails { title: string, artist: string, album: string, cover: image, duration: string, source: string, resource-id: string, availability: string, playable: bool }
+export struct ImportCandidate { resource: string, title: string, detail: string }
+struct VersionPreview { resource: string, loading: bool, error: string }
 struct ModeAppearance { name: string, icon: image }
 export global Theme {
     in-out property <bool> dark:true;
@@ -24,10 +27,11 @@ component IconButton inherits Rectangle {
     in property <image> icon;
     in property <bool> active;
     in property <bool> primary;
+    out property <bool> hovered: touch.has-hover && root.enabled;
     in property <bool> enabled:true;
     callback clicked();
     width:36px;height:36px;border-radius:self.height/2;
-    background:primary ? Theme.accent : touch.has-hover ? Theme.elevated : transparent;
+    background:primary ? Theme.accent : root.hovered ? Theme.elevated : transparent;
     opacity:enabled ? 1 : 0.35;
     animate background {duration:140ms;}
     Image {source:root.icon;colorize:root.primary ? Theme.on-accent : root.active ? Theme.accent : Theme.ink;width:18px;height:18px;x:(parent.width - self.width)/2;y:(parent.height - self.height)/2;}
@@ -165,8 +169,9 @@ export component AppWindow inherits Window {
     private property <length> player-height:root.compact ? 96px : 110px;
     private property <length> actions-width: (root.compact ? 64px : 86px)
         + (root.page-has-video ? (root.compact ? 32px : 50px) : 0px)
-        + (root.can-download ? (root.compact ? 80px : 88px) : 0px)
-        + (root.page-account-actions ? (root.compact ? 64px : 100px) : 0px);
+        + (root.can-download ? (root.compact ? 32px : 50px) : 0px)
+        + (root.page-account-actions ? (root.compact ? 64px : 100px) : 0px)
+        + (root.local-playlist ? (root.compact ? 32px : 50px) : 0px);
     private property <int> card-columns:root.compact ? 2 : 4;
     in-out property <bool> dark:true;
     callback native-theme-changed();
@@ -227,6 +232,10 @@ export component AppWindow inherits Window {
     in property <bool> cards;
     in property <bool> home-page;
     in property <bool> local-playlist;
+    in-out property <string> playlist-query;
+    in property <[string]> playlist-filter-sources;
+    in-out property <int> playlist-filter-index;
+    callback playlist-filter-changed();
     in property <bool> remote-playlist;
     in property <ImportStep> import-step: closed;
     in property <bool> import-busy;
@@ -242,6 +251,13 @@ export component AppWindow inherits Window {
     in property <string> import-original;
     in-out property <string> import-query;
     in property <[ImportCandidate]> import-candidates;
+    in property <VersionPreview> version-preview;
+    in property <[string]> import-filter-sources;
+    in-out property <int> import-filter-index;
+    in property <TrackDetails> track-details;
+    out property <bool> choosing-version: root.import-step == ImportStep.matching
+        || (root.import-step == ImportStep.details && root.import-filter-sources.length > 1
+            && (!root.track-details.playable || root.import-filter-index > 0));
     in property <bool> import-more;
     callback import-action(string, int);
     in property <[Row]> queue;
@@ -521,6 +537,11 @@ export component AppWindow inherits Window {
                             if root.can-filter: ActionButton {text:"仅看免登录可下载";primary:root.guest-only;clicked=>{root.guest-only=!root.guest-only;root.filter-changed();}}
                             Rectangle {horizontal-stretch:1;}
                         }
+                        if root.local-playlist: HorizontalLayout {
+                            height:34px;spacing:8px;alignment:end;
+                            LineEdit {width:root.compact ? 160px : 216px;placeholder-text:"在歌单内搜索";accessible-label:"在歌单内搜索曲名、歌手或专辑";text<=>root.playlist-query;edited(v)=>{root.playlist-filter-changed();}}
+                            ComboBox {width:root.compact ? 120px : 156px;accessible-label:"按歌曲来源筛选";model:root.playlist-filter-sources;current-index<=>root.playlist-filter-index;selected(v)=>{root.playlist-filter-changed();}}
+                        }
                         if root.page-tabs.length>0: HorizontalLayout {
                             height:38px;spacing:26px;
                             for tab[i] in root.page-tabs: PageTab {
@@ -541,9 +562,9 @@ export component AppWindow inherits Window {
                             private property <bool> short-panel:self.height < (root.compact ? 200px : 300px);
                             VerticalLayout {x:0px;y:0px;width:parent.width;height:parent.height;alignment:center;padding:empty-panel.short-panel ? 10px : root.compact ? 16px : 50px;spacing:empty-panel.short-panel ? 6px : root.compact ? 12px : 18px;
                                 if !empty-panel.short-panel: HorizontalLayout {alignment:center;height:root.compact ? 48px : 64px;Image {source:@image-url("icons/disc.svg");colorize:Theme.accent;width:root.compact ? 48px : 64px;height:self.width;}}
-                                Text {text:root.can-filter&&root.guest-only?"当前结果中没有免登录可下载的歌曲":root.search-page?"没有找到匹配结果":root.source-index==0?"把喜欢的音乐，留在身边。":"此刻，这里还很安静。";color:Theme.ink;font-size:root.compact ? 18px : 23px;font-weight:600;wrap:word-wrap;min-width:0px;horizontal-alignment:center;}
-                                Text {text:root.can-filter&&root.guest-only?"可关闭筛选查看其他录音。":root.search-page?"试试其他曲名或歌手名。":root.source-index==0?"添加音乐文件夹，让每一张唱片都有自己的位置。":"试试搜索喜欢的音乐，或切换到其他页面。";color:Theme.muted;font-size:12px;wrap:word-wrap;min-width:0px;horizontal-alignment:center;}
-                                HorizontalLayout {alignment:center;if root.more: ActionButton {text:root.next-label;clicked=>{root.action("more");}}if root.source-index==0&&!root.search-page: ActionButton {text:"添加音乐目录";primary:true;clicked=>{root.action("add-folder");}}}
+                                Text {text:root.local-playlist ? (root.playlist-query != "" || root.playlist-filter-index > 0 ? "没有符合条件的歌曲" : "歌单里还没有歌曲") : root.can-filter&&root.guest-only?"当前结果中没有免登录可下载的歌曲":root.search-page?"没有找到匹配结果":root.source-index==0?"把喜欢的音乐，留在身边。":"此刻，这里还很安静。";color:Theme.ink;font-size:root.compact ? 18px : 23px;font-weight:600;wrap:word-wrap;min-width:0px;horizontal-alignment:center;}
+                                Text {text:root.local-playlist ? (root.playlist-query != "" || root.playlist-filter-index > 0 ? "可调整搜索词或来源筛选。" : "可以导入歌单或从本地音乐添加歌曲。") : root.can-filter&&root.guest-only?"可关闭筛选查看其他录音。":root.search-page?"试试其他曲名或歌手名。":root.source-index==0?"添加音乐文件夹，让每一张唱片都有自己的位置。":"试试搜索喜欢的音乐，或切换到其他页面。";color:Theme.muted;font-size:12px;wrap:word-wrap;min-width:0px;horizontal-alignment:center;}
+                                HorizontalLayout {alignment:center;if root.more: ActionButton {text:root.next-label;clicked=>{root.action("more");}}if root.source-index==0&&!root.search-page&&!root.local-playlist: ActionButton {text:"添加音乐目录";primary:true;clicked=>{root.action("add-folder");}}}
                             }
                         }
                         if root.cards&&root.rows.length>0: cards-view:=ScrollView {content-width:self.width;VerticalLayout {spacing:22px;
@@ -571,9 +592,15 @@ export component AppWindow inherits Window {
                                 for row[i] in root.rows: Rectangle {height:66px;border-radius:10px;background:row-touch.has-hover ? Theme.elevated : i/2==floor(i/2) ? Theme.panel.with-alpha(0.45) : transparent;
                                     row-touch:=TouchArea {
                                         x:0px;y:0px;width:max(0px,parent.width - root.actions-width - 10px);height:parent.height;
-                                        enabled:!row.disabled;
-                                        clicked=>{if row.kind != "track" {root.row-action(i,"open");}}
-                                        double-clicked=>{if row.kind == "track" {root.row-action(i,"open");}}
+                                        private property <bool> can-switch-source: root.local-playlist && row.kind == "track" && row.disabled;
+                                        enabled:!row.disabled || self.can-switch-source;
+                                        mouse-cursor:self.can-switch-source ? pointer : default;
+                                        clicked=>{
+                                            if self.can-switch-source {root.row-action(i,"details");}
+                                            else if row.kind != "track" {root.row-action(i,"open");}
+                                        }
+                                        double-clicked=>{if row.kind == "track" && !row.disabled {root.row-action(i,"open");}}
+                                        if self.can-switch-source: Tooltip {text:@markdown("单击切换播放来源");}
                                     }
                                     HorizontalLayout {padding:10px;spacing:root.compact ? 8px : 14px;
                                         Text {text:(i+1);width:25px;color:Theme.muted;font-size:11px;vertical-alignment:center;}
@@ -594,22 +621,31 @@ export component AppWindow inherits Window {
                                             }
                                             if row.kind == "track": ListIconButton {
                                                 width:root.compact ? 28px : 36px;icon:@image-url("icons/plus.svg");enabled:!row.disabled;
-                                                description:row.disabled ? "这首歌暂时不可用" : row.resource.starts-with("local:") && root.playlist-index > 0 && root.playlist-index < root.playlist-names.length
+                                                description:row.disabled ? "这首歌暂时不可用" : (root.local-playlist || row.resource.starts-with("local:")) && root.playlist-index > 0 && root.playlist-index < root.playlist-names.length
                                                     ? "加入歌单「" + root.playlist-names[root.playlist-index] + "」" : "加入播放队列";
                                                 clicked=>{root.row-action(i,"add");}
                                             }
-                                            if row.show-download: ActionButton {
-                                                width:74px;text:row.download-label;enabled:!row.download-blocked;
-                                                accessible-role:button;accessible-label:row.download-hint;accessible-enabled:self.enabled;
-                                                accessible-action-default=>{if self.enabled {root.row-action(i,"download");}}
-                                                Tooltip {text:@markdown("\{row.download-hint}");}
+                                            if row.show-download: ListIconButton {
+                                                width:root.compact ? 28px : 36px;enabled:!row.download-blocked;
+                                                active:row.download-state == TrackDownloadState.downloading;
+                                                opacity:self.enabled || self.active ? 1 : row.download-state == TrackDownloadState.ready ? 0.35 : 0.7;
+                                                icon: row.download-state == TrackDownloadState.queued ? @image-url("icons/clock.svg")
+                                                    : row.download-state == TrackDownloadState.downloading ? @image-url("icons/downloading.svg")
+                                                    : row.download-state == TrackDownloadState.saved ? @image-url("icons/check.svg")
+                                                    : row.download-state == TrackDownloadState.retry ? @image-url("icons/retry.svg")
+                                                    : @image-url("icons/download.svg");
+                                                description:row.download-hint;
                                                 clicked=>{root.row-action(i,"download");}
                                             }
                                             if row.account-actions: ListIconButton {
                                                 width:root.compact ? 28px : 36px;active:row.liked;enabled:!row.like-pending;
                                                 icon:row.liked ? @image-url("icons/heart-filled.svg") : @image-url("icons/heart.svg");
-                                                description:row.kind == "album" ? "收藏专辑" : row.like-pending ? "正在更新喜欢状态" : row.liked ? "取消喜欢" : "喜欢这首歌";
+                                                description:row.kind == "album" ? "收藏专辑" : row.like-pending ? "正在更新喜欢状态" : root.local-playlist ? (row.liked ? "从本地喜欢移除" : "加入本地喜欢") : row.liked ? "取消喜欢" : "喜欢这首歌";
                                                 clicked=>{root.row-action(i,row.liked ? "unlike" : "like");}
+                                            }
+                                            if root.local-playlist: ListIconButton {
+                                                width:root.compact ? 28px : 36px;icon:@image-url("icons/info.svg");description:"歌曲详情与换源";
+                                                clicked=>{root.row-action(i,"details");}
                                             }
                                             if row.account-actions || root.local-playlist: ListIconButton {
                                                 width:root.compact ? 28px : 36px;icon:@image-url("icons/close.svg");
@@ -798,18 +834,19 @@ export component AppWindow inherits Window {
             }
         }
     }
-    if root.import-step != ImportStep.closed: Rectangle {
-        background:#00000080;
+    if root.import-step != ImportStep.closed: view:=Rectangle {
+        private property <bool> details: root.import-step == ImportStep.details;
+        background:view.details ? Theme.bg : #00000080;
         TouchArea {}
         Rectangle {
-            width:min(parent.width - 32px, 520px);
-            height:min(parent.height - 32px, root.import-step == ImportStep.matching ? 500px : root.import-step == ImportStep.confirm ? 210px : 414px);
+            width:min(parent.width - 32px, view.details ? 800px : 520px);
+            height:view.details ? min(parent.height - 32px, 640px) : min(parent.height - 32px, root.import-step == ImportStep.matching ? 500px : root.import-step == ImportStep.confirm ? 210px : 414px);
             x:(parent.width - self.width)/2; y:(parent.height - self.height)/2;
             background:Theme.panel; border-radius:16px; border-width:1px; border-color:Theme.muted.with-alpha(0.25);
             VerticalLayout {padding:18px; spacing:9px;
                 HorizontalLayout {height:32px;
-                    Text {text:root.import-step == ImportStep.matching ? "选择其他来源的版本" : root.import-step == ImportStep.confirm ? "歌单中有不可用歌曲" : "导入歌单";color:Theme.ink;font-size:20px;font-weight:600;vertical-alignment:center;horizontal-stretch:1;}
-                    ListIconButton {description:"关闭导入窗口";icon:@image-url("icons/close.svg");enabled:!root.import-busy;clicked=>{root.import-action("close", 0);}}
+                    Text {text:view.details ? "歌曲详情" : root.import-step == ImportStep.matching ? "选择其他来源的版本" : root.import-step == ImportStep.confirm ? "歌单中有不可用歌曲" : "导入歌单";color:Theme.ink;font-size:20px;font-weight:600;vertical-alignment:center;horizontal-stretch:1;}
+                    ListIconButton {description:view.details ? "返回本地歌单" : "关闭导入窗口";icon:@image-url("icons/close.svg");enabled:!root.import-busy;clicked=>{root.import-action("close", 0);}}
                 }
                 if root.import-step == ImportStep.form: ScrollView {HorizontalLayout {VerticalLayout {alignment:start;spacing:8px;
                     Text {text:"来源插件";color:Theme.muted;font-size:12px;}
@@ -823,31 +860,58 @@ export component AppWindow inherits Window {
                     ComboBox {model:root.import-targets;current-index<=>root.import-target-index;enabled:!root.import-busy;}
                     if root.import-target-index == 0: LineEdit {text<=>root.import-name;placeholder-text:"新歌单名称（默认沿用来源歌单名）";enabled:!root.import-busy;}
                 }}}
+                if view.details: HorizontalLayout {height:82px;spacing:14px;
+                    Cover {width:78px;height:78px;source:root.track-details.cover;}
+                    VerticalLayout {alignment:center;spacing:5px;min-width:0px;
+                        Text {text:root.track-details.title;color:Theme.ink;font-size:20px;font-weight:600;overflow:elide;}
+                        Text {text:(root.track-details.artist == "" ? "未知歌手" : root.track-details.artist) + " · " + (root.track-details.album == "" ? "未知专辑" : root.track-details.album) + " · " + root.track-details.duration;color:Theme.muted;overflow:elide;}
+                        Text {text:root.track-details.source + " · " + root.track-details.availability + " · ID " + root.track-details.resource-id;color:Theme.muted;font-size:12px;overflow:elide;}
+                    }
+                }
+                if view.details: HorizontalLayout {height:34px;spacing:12px;
+                    Text {text:"播放来源";color:Theme.ink;vertical-alignment:center;}
+                    ComboBox {width:190px;accessible-label:"切换这首歌的播放来源";model:root.import-filter-sources;current-index<=>root.import-filter-index;enabled:!root.import-busy && root.import-filter-sources.length > 1;selected(v)=>{root.import-action("filter",self.current-index);}}
+                    Rectangle {horizontal-stretch:1;}
+                }
                 if root.import-step == ImportStep.matching: Text {text:root.import-original;color:Theme.ink;font-weight:600;overflow:elide;}
-                if root.import-step == ImportStep.matching: HorizontalLayout {spacing:8px;
-                    LineEdit {text<=>root.import-query;placeholder-text:"曲名或歌手";enabled:!root.import-busy;accepted=>{root.import-action("search", 0);}}
+                if root.choosing-version: HorizontalLayout {spacing:8px;
+                    LineEdit {text<=>root.import-query;placeholder-text:"曲名或歌手";min-width:0px;horizontal-stretch:1;enabled:!root.import-busy;accepted=>{root.import-action("search", 0);}}
+                    if !view.details && root.import-filter-sources.length > 1: ComboBox {width:138px;accessible-label:"筛选候选版本的来源";model:root.import-filter-sources;current-index<=>root.import-filter-index;enabled:!root.import-busy;selected(v)=>{root.import-action("filter",self.current-index);}}
                     ActionButton {text:"搜索";enabled:!root.import-busy;clicked=>{root.import-action("search", 0);}}
                 }
                 if root.import-status != "": Text {text:root.import-status;color:Theme.muted;wrap:word-wrap;overflow:elide;min-height:18px;max-height:64px;}
-                if root.import-step == ImportStep.matching: ScrollView {VerticalLayout {alignment:start;spacing:5px;
-                    for candidate[i] in root.import-candidates: Rectangle {height:54px;background:Theme.elevated;border-radius:8px;
+                if root.choosing-version: ScrollView {VerticalLayout {alignment:start;spacing:5px;
+                    for candidate[i] in root.import-candidates: candidate-row:=Rectangle {height:54px;background:Theme.elevated;border-radius:8px;
+                        private property <bool> current: candidate.resource == root.version-preview.resource;
+                        private property <bool> loading: self.current && root.version-preview.loading;
+                        private property <bool> playing: self.current && root.playing;
+                        private property <string> error: self.current ? root.version-preview.error : "";
                         HorizontalLayout {padding:8px;spacing:8px;
                             VerticalLayout {horizontal-stretch:1;min-width:0px;alignment:center;
                                 Text {text:candidate.title;color:Theme.ink;overflow:elide;min-width:0px;}
-                                Text {text:candidate.detail;color:Theme.muted;font-size:11px;overflow:elide;min-width:0px;}
+                                Text {text:candidate-row.error == "" ? candidate.detail : candidate.detail + " · 试听失败 · " + candidate-row.error;color:Theme.muted;font-size:11px;overflow:elide;min-width:0px;}
                             }
-                            ActionButton {text:"选用此版本";primary:true;enabled:!root.import-busy;clicked=>{root.import-action("choose", i);}}
+                            ListIconButton {
+                                icon:candidate-row.loading ? @image-url("icons/clock.svg") : candidate-row.playing ? @image-url("icons/pause.svg") : @image-url("icons/play.svg");
+                                active:candidate-row.playing || self.hovered;enabled:!root.import-busy && !candidate-row.loading;
+                                description:candidate-row.loading ? "正在加载试听" : candidate-row.playing ? "暂停试听" : candidate-row.error != "" ? "重新试听 · " + candidate-row.error : candidate-row.current ? "继续试听" : "试听此版本";
+                                clicked=>{root.import-action("preview", i);}
+                            }
+                            ListIconButton {
+                                icon:@image-url("icons/check.svg");active:self.hovered;enabled:!root.import-busy;
+                                description:"选用此版本";clicked=>{root.import-action("choose", i);}
+                            }
                         }
                     }
                     if root.import-more: ActionButton {text:"更多结果 / 重试";enabled:!root.import-busy;clicked=>{root.import-action("more", 0);}}
                 }}
-                if root.import-step == ImportStep.confirm: Rectangle {vertical-stretch:1;}
+                if root.import-step == ImportStep.confirm || (view.details && !root.choosing-version): Rectangle {vertical-stretch:1;}
                 HorizontalLayout {alignment:end;spacing:8px;
                     if root.import-step == ImportStep.form: ActionButton {text:"导入";primary:true;enabled:!root.import-busy && root.import-sources.length > 0 && root.import-id != "";clicked=>{root.import-action("submit", 0);}}
                     if root.import-step == ImportStep.confirm: ActionButton {text:"保留原曲并完成";clicked=>{root.import-action("close", 0);}}
                     if root.import-step == ImportStep.confirm: ActionButton {text:"查询其他来源";primary:true;clicked=>{root.import-action("match", 0);}}
                     if root.import-step == ImportStep.matching: ActionButton {text:"跳过这首";enabled:!root.import-busy;clicked=>{root.import-action("skip", 0);}}
-                    if root.import-step == ImportStep.matching: ActionButton {text:"完成";enabled:!root.import-busy;clicked=>{root.import-action("close", 0);}}
+                    if root.import-step == ImportStep.matching || view.details: ActionButton {text:view.details ? "返回歌单" : "完成";enabled:!root.import-busy;clicked=>{root.import-action("close", 0);}}
                 }
             }
         }

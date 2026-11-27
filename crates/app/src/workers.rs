@@ -1,6 +1,6 @@
 use super::{Job, Reply, download, plugin_list};
 use anyhow::{Result, anyhow, ensure};
-use music_core::{Item, MusicSource, Request};
+use music_core::{Item, MusicSource, Page, Request};
 use music_library::Library;
 use music_plugin_host::{Runtime, manifest};
 use serde_json::{Value, json};
@@ -117,18 +117,27 @@ impl Workers {
         if op == "import-targets" {
             return Ok(json!(db.playlist_choices()?));
         }
-        if op == "import-replace" {
+        if op == "import-search" {
+            let mut page: Page =
+                serde_json::from_value(db.call(Request::new("search", args.clone()))?)?;
+            page.items
+                .retain(|t| db.path(&t.key.id).is_ok_and(|p| p.is_file()));
+            return Ok(json!(page));
+        }
+        if matches!(op, "import-replace" | "import-change-source") {
             let item: Item = serde_json::from_value(args["track"].clone())?;
             ensure!(
-                plugin_list(&root.join("plugins"), &db)
-                    .iter()
-                    .any(|(m, on)| *on && m.id == item.key.source),
+                item.key.source == "local"
+                    || plugin_list(&root.join("plugins"), &db)
+                        .iter()
+                        .any(|(m, on)| *on && m.id == item.key.source),
                 "替选歌曲的来源未安装或未启用"
             );
-            db.replace_unavailable(
+            db.replace_playlist_track(
                 args["id"].as_str().unwrap_or_default(),
                 &serde_json::from_value(args["original"].clone())?,
                 item,
+                op == "import-replace",
             )?;
             return Ok(Value::Null);
         }

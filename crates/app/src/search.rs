@@ -19,6 +19,7 @@ impl Source {
     }
 }
 
+#[derive(Default)]
 pub(super) struct Search {
     pub sources: Vec<Source>,
     pub items: Vec<Item>,
@@ -56,12 +57,43 @@ impl Search {
         })
     }
 
+    pub fn replacements(plugins: &[(Manifest, bool)], original: &str, include_local: bool) -> Self {
+        let mut search = Self::new(plugins, "local", "track").unwrap_or_default();
+        search.sources.retain(|s| s.id != original);
+        if include_local && original != "local" {
+            search.sources.insert(
+                0,
+                Source {
+                    id: "local".into(),
+                    name: "本地音乐".into(),
+                    anonymous: false,
+                    downloads: false,
+                    likes: true,
+                    page_size: 100,
+                    next: Some(0),
+                    pending: None,
+                    error: None,
+                },
+            );
+        }
+        search
+    }
+
     pub fn requests(&mut self, guest_only: bool) -> Vec<(String, u64)> {
+        self.take_requests(guest_only, false)
+    }
+
+    pub fn first_requests(&mut self) -> Vec<(String, u64)> {
+        self.take_requests(false, true)
+    }
+
+    fn take_requests(&mut self, guest_only: bool, first_only: bool) -> Vec<(String, u64)> {
         let mut jobs = Vec::new();
         for (i, source) in self.sources.iter_mut().enumerate() {
             if self.selected.is_some_and(|v| v != i)
                 || !source.eligible(guest_only)
                 || source.pending.is_some()
+                || (first_only && (source.next != Some(0) || source.error.is_some()))
             {
                 continue;
             }
@@ -135,18 +167,13 @@ impl Search {
             .collect()
     }
 
-    pub fn visible(&self, guest_only: bool) -> Vec<Item> {
-        self.items
-            .iter()
-            .filter(|item| {
-                self.scope(guest_only).any(|s| {
-                    s.id == item.key.source
-                        && (!guest_only
-                            || (item.kind == "track" && item.downloadable == Some(true)))
-                })
+    pub fn visible(&self, guest_only: bool) -> impl Iterator<Item = &Item> {
+        self.items.iter().filter(move |item| {
+            self.scope(guest_only).any(|s| {
+                s.id == item.key.source
+                    && (!guest_only || (item.kind == "track" && item.downloadable == Some(true)))
             })
-            .cloned()
-            .collect()
+        })
     }
 }
 
@@ -230,7 +257,7 @@ mod tests {
             }),
         );
         assert_eq!(q.pending(false), 2);
-        assert_eq!(q.visible(true).len(), 1);
+        assert_eq!(q.visible(true).count(), 1);
         q.accept(
             "account",
             0,
@@ -240,8 +267,8 @@ mod tests {
             }),
         );
         q.accept("lookup", 0, Err("offline".into()));
-        assert_eq!(q.visible(false).len(), 4);
-        assert_eq!(q.visible(true)[0].key.source, "public");
+        assert_eq!(q.visible(false).count(), 4);
+        assert_eq!(q.visible(true).next().unwrap().key.source, "public");
         assert_eq!(q.errors(false), ["lookup：offline"]);
         q.selected = Some(1); // Search-only source, waiting for a retry.
         assert!(q.more(false));
@@ -266,7 +293,7 @@ mod tests {
             }),
         );
         q.selected = Some(2);
-        assert_eq!(q.visible(true).len(), 2);
+        assert_eq!(q.visible(true).count(), 2);
         assert!(!q.more(false));
         assert_eq!(
             Search::new(&plugins, "local", "album")
