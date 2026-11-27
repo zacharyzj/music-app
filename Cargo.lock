@@ -3100,7 +3100,7 @@ dependencies = [
 
 [[package]]
 name = "music-app"
-version = "0.2.17"
+version = "0.2.18"
 dependencies = [
  "anyhow",
  "directories",
@@ -3127,7 +3127,7 @@ dependencies = [
 
 [[package]]
 name = "music-core"
-version = "0.2.17"
+version = "0.2.18"
 dependencies = [
  "serde",
  "serde_json",
@@ -3135,7 +3135,7 @@ dependencies = [
 
 [[package]]
 name = "music-library"
-version = "0.2.17"
+version = "0.2.18"
 dependencies = [
  "anyhow",
  "lofty",
@@ -3151,7 +3151,7 @@ dependencies = [
 
 [[package]]
 name = "music-player"
-version = "0.2.17"
+version = "0.2.18"
 dependencies = [
  "anyhow",
  "jni 0.21.1",
@@ -3165,7 +3165,7 @@ dependencies = [
 
 [[package]]
 name = "music-plugin-host"
-version = "0.2.17"
+version = "0.2.18"
 dependencies = [
  "aes",
  "aes-gcm",
@@ -3190,7 +3190,7 @@ dependencies = [
 
 [[package]]
 name = "music-plugin-sdk"
-version = "0.2.17"
+version = "0.2.18"
 dependencies = [
  "music-core",
  "serde_json",
@@ -3295,7 +3295,7 @@ dependencies = [
 
 [[package]]
 name = "netease"
-version = "0.2.17"
+version = "0.2.18"
 dependencies = [
  "aes",
  "ecb",
@@ -7026,7 +7026,7 @@ checksum = "ec7a2a501ed189703dba8b08142f057e887dfc4b2cc4db2d343ac6376ba3e0b9"
 
 [[package]]
 name = "xtask"
-version = "0.2.17"
+version = "0.2.18"
 dependencies = [
  "anyhow",
  "music-core",
