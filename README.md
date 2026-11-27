@@ -88,6 +88,8 @@ cargo run -p music-app --locked
 
 发布包位于 `dist/MusicPlayer-windows-x64-0.2.13.zip`；可选插件为 `dist/netease.ypm.zip`、`dist/bilibili.ypm.zip`、`dist/24bit.ypm.zip`、`dist/audius.ypm.zip` 和 `dist/incompetech.ypm.zip`。打包脚本会重新构建插件和 release 主程序，`-Debug` 可生成调试包。
 
+每次 Windows 打包成功后，`dist/` 只保留本次生成的播放器目录和 ZIP、插件包、`plugins.json`，以及下次打包要用的 `native/mpv-2.dll`。调试包也遵循这个规则。构建或压缩失败时，上一次成功的产物仍可使用。
+
 主程序包不预装在线源。`cargo xtask plugin` 分别将五个音乐源打包为 `.ypm.zip`。安装器也接受兼容的 YesPlayMusic 插件 ZIP，支持根目录或一层外包装目录中的 `plugin.json`。本宿主实现了网易云使用的 API 子集，不承诺兼容所有 YesPlayMusic 扩展能力。
 
 发布其他平台的播放器时，附件沿用 `MusicPlayer-平台-架构-版本` 命名，例如 `MusicPlayer-macos-arm64-0.2.13.dmg`、`MusicPlayer-linux-x64-0.2.13.AppImage`、`MusicPlayer-android-arm64-v8a-0.2.13.apk`。macOS 和 Android 通用包的架构可写 `universal`。检查更新会优先选择当前架构的包，再选通用包。

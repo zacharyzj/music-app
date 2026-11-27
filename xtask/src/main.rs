@@ -3,7 +3,8 @@ fn main() -> Result<()> {
     let args: Vec<_> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
         Some("plugin") => {
-            std::fs::create_dir_all("dist")?;
+            let output = std::path::Path::new(args.get(1).map_or("dist", String::as_str));
+            std::fs::create_dir_all(output)?;
             use music_plugin_host::catalog::{Catalog, Entry, checksum};
             let base = std::env::var("MUSIC_PLUGIN_RELEASE_BASE").unwrap_or_else(|_| {
                 format!(
@@ -22,9 +23,15 @@ fn main() -> Result<()> {
                 let bytes = music_plugin_host::bundle(std::path::Path::new(directory))?;
                 let m = music_plugin_host::manifest(&bytes)?;
                 music_plugin_host::Runtime::new().validate(&bytes)?;
-                let path = format!("dist/{}.ypm.zip", m.id);
+                let path = output.join(format!("{}.ypm.zip", m.id));
                 std::fs::write(&path, &bytes)?;
-                println!("{} {}: {path} ({} bytes)", m.name, m.version, bytes.len());
+                println!(
+                    "{} {}: {} ({} bytes)",
+                    m.name,
+                    m.version,
+                    path.display(),
+                    bytes.len()
+                );
                 let raw: serde_json::Value = serde_json::from_slice(&std::fs::read(
                     std::path::Path::new(directory).join("plugin.json"),
                 )?)?;
@@ -40,7 +47,7 @@ fn main() -> Result<()> {
                 });
             }
             std::fs::write(
-                "dist/plugins.json",
+                output.join("plugins.json"),
                 serde_json::to_vec_pretty(&Catalog { schema: 1, plugins })?,
             )?;
         }
@@ -198,7 +205,7 @@ fn main() -> Result<()> {
             None,
         )?,
         _ => bail!(
-            "Usage: cargo xtask plugin | probe [query] [--source id] [--play] | probe-account <app-data-dir> | play <file>"
+            "Usage: cargo xtask plugin [output-dir] | probe [query] [--source id] [--play] | probe-account <app-data-dir> | play <file>"
         ),
     };
     Ok(())
