@@ -21,6 +21,7 @@ pub(super) struct Workers {
     pub generation: Arc<AtomicU64>,
     pub out: mpsc::Sender<Reply>,
     pub download_tx: mpsc::Sender<download::Transfer>,
+    pub cloud_reply: mpsc::Sender<std::result::Result<Value, String>>,
 }
 
 struct PluginWorker {
@@ -91,12 +92,17 @@ impl Workers {
     }
 
     fn reply(&self, job: Job, result: Result<Value>) {
+        let value = result.map_err(|error| error.to_string());
+        if matches!(job.request.op.as_str(), "cloud-upload" | "cloud-download") {
+            let _ = self.cloud_reply.send(value);
+            return;
+        }
         let _ = self.out.send(Reply {
             source: job.source,
             op: job.request.op,
             args: job.request.args,
             generation: job.generation,
-            value: result.map_err(|error| error.to_string()),
+            value,
         });
     }
 
@@ -254,6 +260,8 @@ impl Workers {
                     | "recent"
                     | "resolve"
                     | "download"
+                    | "cloud-download"
+                    | "cloud-upload"
                     | "lyrics"
                     | "account"
                     | "loginStart"
@@ -270,7 +278,7 @@ impl Workers {
             anyhow::bail!("插件已停用");
         }
         let package = self.root.join("plugins").join(format!("{source}.ypm.zip"));
-        if op == "download" {
+        if matches!(op, "download" | "cloud-download") {
             let item: Item = serde_json::from_value(args["track"].clone())?;
             anyhow::ensure!(
                 item.key.source == source
@@ -282,10 +290,12 @@ impl Workers {
                 return Ok(json!(path));
             }
             drop(db);
-            let bytes = std::fs::read(package)?;
+            let bytes = std::fs::read(package).context("来源插件未安装")?;
             let m = manifest(&bytes)?;
             anyhow::ensure!(
-                m.capabilities.iter().any(|c| c == "download") && !m.media.is_empty(),
+                m.id == source
+                    && m.capabilities.iter().any(|c| c == "download")
+                    && !m.media.is_empty(),
                 "请更新音乐源插件以启用下载"
             );
             let file = rt.call(
@@ -293,20 +303,34 @@ impl Workers {
                 &self.root.join("plugin-data"),
                 Request::new("download", json!({"id":item.key.id})),
             )?;
+            let transfer = download::Transfer {
+                item,
+                domains: m.media,
+                url: file["url"].as_str().unwrap_or_default().into(),
+                size: file["size"].as_u64().filter(|n| *n > 0),
+                attribution: file["attribution"].as_str().unwrap_or_default().to_owned(),
+            };
+            if op == "cloud-download" {
+                return Ok(json!(transfer));
+            }
             self.download_tx
-                .send(download::Transfer {
-                    item,
-                    domains: m.media,
-                    url: file["url"].as_str().unwrap_or_default().into(),
-                    size: file["size"].as_u64().filter(|n| *n > 0),
-                    attribution: file["attribution"].as_str().unwrap_or_default().to_owned(),
-                })
+                .send(transfer)
                 .map_err(|_| anyhow::anyhow!("下载线程已经停止"))?;
             return Ok(Value::Null);
         }
         drop(db);
         let bytes = std::fs::read(package)?;
         let data = self.root.join("plugin-data");
+        if op == "cloud-upload" {
+            let m = manifest(&bytes)?;
+            ensure!(
+                source == "netease"
+                    && m.id == source
+                    && m.capabilities.iter().any(|c| c == "cloudUpload"),
+                "请更新并启用支持云盘上传的网易云音乐插件"
+            );
+            return rt.call(&bytes, &data, Request::new("cloudUpload", args.clone()));
+        }
         if op == "import-playlist" {
             let m = manifest(&bytes)?;
             ensure!(
@@ -422,6 +446,7 @@ mod tests {
             root: dir.path().into(),
             library: Arc::new(Mutex::new(Library::open(dir.path())?)),
             out: mpsc::channel().0,
+            cloud_reply: mpsc::channel().0,
             download_tx: mpsc::channel().0,
             generation: Arc::new(AtomicU64::new(0)),
         };
@@ -479,6 +504,7 @@ mod tests {
             root: dir.path().into(),
             library: Arc::new(Mutex::new(db)),
             out,
+            cloud_reply: mpsc::channel().0,
             download_tx,
             generation: Arc::new(AtomicU64::new(0)),
         }

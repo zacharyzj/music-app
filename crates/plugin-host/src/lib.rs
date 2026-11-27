@@ -1,10 +1,12 @@
 pub mod catalog;
 mod package;
 mod storage;
-use aes::cipher::{BlockEncryptMut, KeyInit, block_padding::Pkcs7};
+use aes::cipher::{BlockEncryptMut, KeyInit, KeyIvInit, block_padding::Pkcs7};
 use anyhow::{Result, anyhow, bail, ensure};
+use base64::Engine;
 use music_core::{MAX_MESSAGE, Request};
 pub use package::{Package, allowed, bundle, install, install_with, manifest, media_allowed};
+use rand::{Rng, distributions::Alphanumeric};
 use rquickjs::{Context, Ctx, Function, Module, Runtime as JsRuntime};
 use serde_json::{Value, json};
 use std::{
@@ -103,6 +105,25 @@ impl Host {
                 "{:x}",
                 md5::compute(v["text"].as_str().unwrap_or(""))
             ))),
+            "randomKey" => Ok(json!(
+                rand::thread_rng()
+                    .sample_iter(Alphanumeric)
+                    .take(16)
+                    .map(char::from)
+                    .collect::<String>()
+            )),
+            "aesCbc" => {
+                let key = v["key"].as_str().unwrap_or_default().as_bytes();
+                let iv = v["iv"].as_str().unwrap_or_default().as_bytes();
+                let cipher = cbc::Encryptor::<aes::Aes128>::new_from_slices(key, iv)
+                    .map_err(|_| anyhow!("AES 密钥和 IV 必须为 16 字节"))?;
+                let bytes = cipher.encrypt_padded_vec_mut::<Pkcs7>(
+                    v["text"].as_str().unwrap_or_default().as_bytes(),
+                );
+                Ok(json!(
+                    base64::engine::general_purpose::STANDARD.encode(bytes)
+                ))
+            }
             "aes" => {
                 let key = v["key"].as_str().unwrap_or("").as_bytes();
                 ensure!(key.len() == 16, "AES 密钥必须为 16 字节");

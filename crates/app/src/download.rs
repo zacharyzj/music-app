@@ -206,6 +206,7 @@ impl UiState {
     }
 }
 
+#[derive(Serialize, Deserialize)]
 pub struct Transfer {
     pub item: Item,
     pub url: String,
@@ -262,7 +263,7 @@ pub(super) fn worker(
     tx
 }
 
-fn fetch(
+pub(super) fn fetch(
     directory: &Path,
     job: &Transfer,
     progress: impl FnMut(u64, Option<u64>),

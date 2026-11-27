@@ -26,6 +26,67 @@ fn module(source: &str) -> Package {
     p.main = "index.js".into();
     p
 }
+
+#[test]
+fn netease_cloud_upload_preserves_ids_and_requires_the_same_account() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let package = upstream();
+    assert!(
+        package
+            .manifest
+            .capabilities
+            .iter()
+            .any(|c| c == "cloudUpload")
+    );
+    let mut s = session(package, dir.path());
+    let call = |s: &mut Session, args| s.call(Request::new("cloudUpload", args));
+    assert!(
+        call(&mut s, json!({"step":"prepare","accountId":"7"}))
+            .unwrap_err()
+            .to_string()
+            .contains("登录")
+    );
+    s.host
+        .borrow_mut()
+        .storage
+        .set("account", json!({"id":"7"}))?;
+    s.host
+        .borrow_mut()
+        .storage
+        .set("cookies", json!({"MUSIC_U":"fixture"}))?;
+    let prepare = json!({"step":"prepare","accountId":"7","md5":"abc","size":123,"ext":"flac","filename":"测试.flac","bitrate":500000});
+    s.host.borrow_mut().fixture = Some(json!({
+        "cloud/upload/check":{"responses":[{"needUpload":true,"songId":"0"},{"needUpload":false,"songId":"8"}]},
+        "https://music.163.com/weapi/nos/token/alloc":{"responses":[
+            {"_text":"{\"code\":200,\"result\":{\"resourceId\":109951169999999999,\"objectKey\":\"music/a\",\"token\":\"ticket\"}}"},
+            {"result":{"resourceId":"99"}}]},
+        "upload/cloud/info/v2":{"_text":"{\"code\":200,\"songId\":109951169999999998}"},
+        "cloud/pub/v2":{"responses":[{"code":200}]}
+    }));
+    let ticket = call(&mut s, prepare.clone())?;
+    assert_eq!(
+        ticket,
+        json!({"needUpload":true,"songId":"0","resourceId":"109951169999999999","objectKey":"music/a","token":"ticket"})
+    );
+    let instant = call(&mut s, prepare)?;
+    assert_eq!(
+        (
+            instant["needUpload"].as_bool(),
+            instant["resourceId"].as_str()
+        ),
+        (Some(false), Some("99"))
+    );
+    let mut finish = json!({"step":"finish","accountId":"8","resourceId":ticket["resourceId"],"songId":"0","md5":"abc","filename":"测试.flac","song":"测试","bitrate":500000});
+    assert!(
+        call(&mut s, finish.clone())
+            .unwrap_err()
+            .to_string()
+            .contains("账号已切换")
+    );
+    finish["accountId"] = json!("7");
+    assert_eq!(call(&mut s, finish)?["songId"], "109951169999999998");
+    Ok(())
+}
 #[test]
 fn upstream_search_and_large_account_pages() {
     let dir = tempfile::tempdir().unwrap();

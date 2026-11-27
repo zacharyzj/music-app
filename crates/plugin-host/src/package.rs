@@ -148,6 +148,7 @@ impl Package {
                             | "readOnly"
                             | "video"
                             | "heartbeat"
+                            | "cloudUpload"
                     )
                 }));
                 caps

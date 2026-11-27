@@ -9,6 +9,7 @@ name = "music_app_ui"
 crate-type = ["rlib","cdylib"]
 [dependencies]
 music-core.workspace = true
+md5 = "0.7"
 music-library.workspace = true
 music-plugin-host.workspace = true
 music-player.workspace = true

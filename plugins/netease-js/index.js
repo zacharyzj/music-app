@@ -446,6 +446,45 @@ export async function lyrics({ id: value }) {
   return { lrc: j.lrc?.lyric || "", translation: j.tlyric?.lyric || "" };
 }
 
+export async function cloudUpload({ step, accountId, md5, size, filename, ext, bitrate,
+  song, artist, album, songId, resourceId }) {
+  if (step === "account") return await account();
+  if (String(requireAccount().id) !== accountId) fail("signIn", "网易云账号已切换，请重新开始上传");
+  if (step === "session") return true;
+  const options = { cloudIds: true };
+  try {
+    if (step === "prepare") {
+      const check = await api("/api/cloud/upload/check", {
+        bitrate: String(bitrate), ext: "", length: size, md5, songId: "0", version: 1,
+      }, options);
+      if (![true, false, 0, 1].includes(check.needUpload)) fail("failed", "网易云未返回文件检查结果");
+      const name = filename.replace(/\.[^.]+$/, "").replace(/\s/g, "").replace(/\./g, "_") || md5;
+      const { result } = await api("/api/nos/token/alloc", {
+        bucket: "jd-musicrep-privatecloud-audio-public", ext, filename: name,
+        local: false, nos_product: 3, type: "audio", md5,
+      }, { ...options, web: true });
+      if (!result?.resourceId || (check.needUpload && (!result.objectKey || !result.token))) {
+        fail("failed", "网易云未返回完整的上传凭证");
+      }
+      return { needUpload: Boolean(check.needUpload), songId: id(check.songId),
+        resourceId: id(result.resourceId), objectKey: result.objectKey || "", token: result.token || "" };
+    }
+    if (step === "finish") {
+      const info = await api("/api/upload/cloud/info/v2", {
+        md5, songid: id(songId), filename, song, artist: artist || "未知艺术家",
+        album: album || "未知专辑", bitrate: String(bitrate), resourceId: id(resourceId),
+      }, options);
+      const published = id(info.songId);
+      await api("/api/cloud/pub/v2", {songid: published}, options);
+      return {songId: published};
+    }
+    fail("unsupported", "未知的云盘上传操作");
+  } catch (e) {
+    if (e.code === "signIn" && currentId() === accountId) resetSession();
+    throw e;
+  }
+}
+
 export function trackMenu() {
   return [{ id: "open-netease", title: t("在网易云音乐网页打开") }];
 }

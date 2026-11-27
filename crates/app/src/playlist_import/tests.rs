@@ -99,6 +99,7 @@ fn imports_with_installed_plugins_and_only_replaces_after_manual_selection() -> 
         library: library.clone(),
         generation: genr.clone(),
         out,
+        cloud_reply: mpsc::channel().0,
         download_tx: mpsc::channel().0,
     }
     .start(rx, Arc::new(AtomicBool::new(false)));

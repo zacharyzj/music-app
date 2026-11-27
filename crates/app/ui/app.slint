@@ -1,9 +1,10 @@
-import { Palette, LineEdit, ComboBox, Slider, ScrollView, CheckBox } from "std-widgets.slint";
+import { Palette, LineEdit, ComboBox, Slider, ScrollView, ListView, CheckBox } from "std-widgets.slint";
 export enum TrackDownloadState { ready, queued, downloading, saved, retry }
 export struct Row {resource:string,title:string,subtitle:string,album:string,duration:string,kind:string,cover:image,disabled:bool,recommended:bool,show-video:bool,download-blocked:bool,download-state:TrackDownloadState,download-hint:string,show-download:bool,account-actions:bool,liked:bool,like-pending:bool}
 export struct PluginRow { name: string, permissions: string, enabled: bool }
 export struct CatalogRow { title: string, description: string, permissions: string, action-label: string, can-install: bool }
 export struct DownloadRow { title:string, artist:string, status:string, fraction:float, active:bool, failed:bool }
+export struct CloudUploadRow { title:string, status:string, failed:bool }
 export struct Nav {title:string}
 export enum PlayerMode { sequential, repeat-all, repeat-one, shuffle, heartbeat }
 export enum FavoriteState { no-track, unsupported, checking, retry, unliked, liked, adding, removing }
@@ -219,6 +220,13 @@ export component AppWindow inherits Window {
     in-out property <bool> guest-only;
     in-out property <bool> show-downloads;
     callback download-action(int,string);
+    callback cloud-upload(bool);
+    callback stop-cloud-upload();
+    in-out property <bool> show-cloud-upload;
+    in property <bool> cloud-busy;
+    in property <bool> cloud-stopping;
+    in property <string> cloud-status;
+    in property <[CloudUploadRow]> cloud-rows;
     callback filter-changed();
     in property <string> download-notice;
     private property <string> row-notice;
@@ -365,7 +373,7 @@ export component AppWindow inherits Window {
         // feeding its preferred/minimum sizes back into the window constraints.
         x:0px;y:0px;width:root.width;height:root.height;
         capture-key-pressed(event) => {
-            if TextInputInterface.text-input-focused || root.show-catalog || root.show-login || root.import-step != ImportStep.closed
+            if TextInputInterface.text-input-focused || root.show-catalog || root.show-login || root.show-cloud-upload || root.import-step != ImportStep.closed
                 || event.modifiers.alt || event.modifiers.meta || (event.modifiers.control && event.modifiers.shift) {
                 return reject;
             }
@@ -461,6 +469,10 @@ export component AppWindow inherits Window {
                     HorizontalLayout {height:42px;spacing:10px;
                         Text {text:root.show-settings?"偏好与扩展":root.video-page?"正在看视频":root.show-lyrics?"正在聆听":root.heading;color:Theme.ink;font-size:root.compact ? 24px : 28px;font-weight:700;min-width:0px;overflow:elide;horizontal-stretch:1;vertical-alignment:center;}
                         if root.album-detail&&!root.show-settings&&!root.show-lyrics: ActionButton {text:"收藏专辑";clicked=>{root.action("save-album");}}
+                        if root.local-playlist && !root.show-settings && !root.show-lyrics: ListIconButton {
+                            description: root.cloud-busy ? "查看云盘上传进度" : "上传整张歌单到网易云云盘";
+                            icon:@image-url("icons/cloud-upload.svg"); clicked=>{root.cloud-upload(false);}
+                        }
                         if (root.source-index == 0 || root.remote-playlist) && !root.show-settings && !root.show-lyrics: ActionButton {
                             text:root.remote-playlist ? "导入到本地歌单" : "导入歌单"; clicked=>{root.import-action("open", 0);}
                         }
@@ -777,7 +789,9 @@ export component AppWindow inherits Window {
         }
         if root.show-queue: Rectangle {width:300px;height:parent.height - root.player-height;x:parent.width - self.width;y:0px;background:Theme.panel;
                         TouchArea {}
-                        VerticalLayout {padding:18px;spacing:18px;HorizontalLayout {Text {text:"接下来播放";color:Theme.ink;font-size:18px;font-weight:600;horizontal-stretch:1;}ListIconButton {description:"关闭播放队列";icon:@image-url("icons/close.svg");clicked=>{root.show-queue=false;}}}Text{text:root.queue.length+" 首歌曲";color:Theme.muted;}
+                        VerticalLayout {padding:18px;spacing:18px;HorizontalLayout {Text {text:"接下来播放";color:Theme.ink;font-size:18px;font-weight:600;horizontal-stretch:1;}
+                            ListIconButton {description:root.cloud-busy ? "查看云盘上传进度" : "上传播放队列到网易云云盘";enabled:root.cloud-busy || root.queue.length>0;icon:@image-url("icons/cloud-upload.svg");clicked=>{root.cloud-upload(true);}}
+                            ListIconButton {description:"关闭播放队列";icon:@image-url("icons/close.svg");clicked=>{root.show-queue=false;}}}Text{text:root.queue.length+" 首歌曲";color:Theme.muted;}
                             ScrollView {VerticalLayout {spacing:10px;padding-right:16px;for row[i] in root.queue: Rectangle {
                                 height:54px;
                                 HorizontalLayout {spacing:8px;
@@ -805,6 +819,7 @@ export component AppWindow inherits Window {
             VerticalLayout {padding:18px;spacing:12px;
                 HorizontalLayout {height:36px;
                     Text {text:"下载队列";font-size:19px;font-weight:600;color:Theme.ink;horizontal-stretch:1;vertical-alignment:center;}
+                    if root.cloud-rows.length > 0: ListIconButton {description:"查看云盘上传记录";icon:@image-url("icons/cloud-upload.svg");clicked=>{root.show-cloud-upload=true;}}
                     IconButton {icon:@image-url("icons/close.svg");clicked=>{root.show-downloads=false;}}
                 }
                 if root.downloads.length==0: Text {text:"暂无下载任务";color:Theme.muted;horizontal-alignment:center;vertical-alignment:center;vertical-stretch:1;}
@@ -826,6 +841,29 @@ export component AppWindow inherits Window {
                         }
                     }
                 }}
+            }
+        }
+    }
+    if root.show-cloud-upload: Rectangle {
+        background:#88000000; TouchArea {}
+        Rectangle {width:min(root.width - 32px, 520px);height:min(root.height - 48px, 420px);
+            x:(parent.width - self.width)/2;y:(parent.height - self.height)/2;background:Theme.panel;
+            border-color:Theme.line;border-width:1px;border-radius:14px;TouchArea {}
+            VerticalLayout {padding:18px;spacing:12px;
+                HorizontalLayout {height:36px;spacing:8px;
+                    Text {text:"上传到网易云云盘";font-size:20px;font-weight:600;color:Theme.ink;vertical-alignment:center;horizontal-stretch:1;}
+                    ListIconButton {description:"关闭上传进度";icon:@image-url("icons/close.svg");clicked=>{root.show-cloud-upload=false;}}
+                }
+                Text {text:root.cloud-status;color:Theme.muted;wrap:word-wrap;}
+                ListView {for file in root.cloud-rows: Rectangle {height:54px;
+                    VerticalLayout {alignment:center;spacing:3px;padding-right:10px;
+                        Text {text:file.title;color:Theme.ink;overflow:elide;min-width:0px;}
+                        Text {text:file.status;color:file.failed ? #d98796 : Theme.muted;font-size:12px;overflow:elide;min-width:0px;Tooltip {text:@markdown("\{file.status}");}}
+                    }
+                }}
+                if root.cloud-busy: HorizontalLayout {alignment:end;
+                    ActionButton {text:root.cloud-stopping ? "当前歌曲完成后停止" : "停止后续上传";enabled:!root.cloud-stopping;clicked=>{root.stop-cloud-upload();}}
+                }
             }
         }
     }

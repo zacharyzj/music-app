@@ -1,3 +1,4 @@
+mod cloud_upload;
 mod covers;
 mod download;
 mod favorites;
@@ -899,12 +900,23 @@ pub fn run_at(root: PathBuf) -> Result<()> {
         out_tx.clone(),
         progress_tx,
     );
+    let (cloud_reply, cloud_rx) = mpsc::channel();
+    let cloud_stop = Arc::new(AtomicBool::new(false));
+    let cloud_updates = cloud_upload::install(
+        &ui,
+        state.clone(),
+        library.clone(),
+        tx.clone(),
+        cloud_rx,
+        cloud_stop.clone(),
+    );
     workers::Workers {
         root: root.clone(),
         library: library.clone(),
         generation: generation.clone(),
         out: out_tx,
         download_tx,
+        cloud_reply,
     }
     .start(rx, cancel.clone());
     let player = Rc::new(Player::start(
@@ -1607,6 +1619,9 @@ pub fn run_at(root: PathBuf) -> Result<()> {
             let Some(ui) = weak.upgrade() else { return };
             let mut s = st.borrow_mut();
             s.sync_video_page(&ui, &job, &pc);
+            for update in cloud_updates.try_iter() {
+                cloud_upload::present(&ui, update);
+            }
             let normalization = s.normalization();
             if normalization != last_normalization {
                 let _ = pc.send(Command::Normalize(normalization.clone()));
@@ -2521,6 +2536,7 @@ pub fn run_at(root: PathBuf) -> Result<()> {
         }
     }
     ui.run()?;
+    cloud_stop.store(true, Ordering::Release);
     cancel.store(true, Ordering::Relaxed);
     let mut s = state.borrow_mut();
     let shutdown_db = Library::open(&root)?;

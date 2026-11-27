@@ -37,6 +37,19 @@ export function requireAccount() {
   return account;
 }
 
+// NOS token allocation uses the web client's double AES-CBC envelope and public RSA exponent 65537.
+function webParams(data) {
+  const secret = host.crypto.randomKey();
+  const iv = "0102030405060708";
+  const inner = host.crypto.aesCbcEncrypt("0CoJUm6Qyw8W8jud", iv, JSON.stringify(data));
+  const modulus = 0xe0b509f6259df8642dbc35662901477df22677ec152b5ff68ace615bb7b725152b3ab17a876aea8a5aa76d2e417629ec4ee341f56135fccf695280104e0312ecbda92557c93870114af6c9d05c4f7f0c3685b7a46bee255932575cce10b424d813cfe4875d3e82047b97ddef52741d546b8e289dc6935b3ece0462db0a22b8e7n;
+  const reversed = BigInt("0x" + [...secret].reverse().map(c => c.charCodeAt(0).toString(16)).join(""));
+  let power = reversed;
+  for (let i = 0; i < 16; i++) power = power * power % modulus;
+  return {params: host.crypto.aesCbcEncrypt(secret, iv, inner),
+    encSecKey: (power * reversed % modulus).toString(16).padStart(256, "0")};
+}
+
 export async function api(path, data = {}, options = {}) {
   if (!/^\/api\/[A-Za-z0-9/_-]+$/.test(path)) fail("failed", "无效的接口路径");
   const jar = options.cookies ?? session();
@@ -53,12 +66,19 @@ export async function api(path, data = {}, options = {}) {
     requestId: `${Date.now()}_${Math.floor(Math.random() * 10000)}`,
     ...jar,
   };
-  const text = JSON.stringify({ ...data, header });
-  const digest = host.crypto.md5(`nobody${path}use${text}md5forencrypt`);
-  const params = host.crypto.aesEcbEncrypt(KEY, `${path}${SEPARATOR}${text}${SEPARATOR}${digest}`);
+  let url, form;
+  if (options.web) {
+    url = "https://music.163.com" + path.replace(/^\/api\//, "/weapi/");
+    form = webParams({ ...data, csrf_token: jar.__csrf || "" });
+  } else {
+    url = ORIGIN + path.replace(/^\/api\//, "/eapi/");
+    const text = JSON.stringify({ ...data, header });
+    const digest = host.crypto.md5(`nobody${path}use${text}md5forencrypt`);
+    form = {params: host.crypto.aesEcbEncrypt(KEY, `${path}${SEPARATOR}${text}${SEPARATOR}${digest}`)};
+  }
   let response;
   try {
-    response = await fetch(ORIGIN + path.replace(/^\/api\//, "/eapi/"), {
+    response = await fetch(url, {
       method: "POST",
       headers: {
         "Content-Type": "application/x-www-form-urlencoded",
@@ -66,7 +86,7 @@ export async function api(path, data = {}, options = {}) {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36",
         "Cookie": Object.entries(header).map(([k, v]) => `${k}=${v}`).join("; "),
       },
-      body: new URLSearchParams({ params }).toString(),
+      body: new URLSearchParams(form).toString(),
       signal: AbortSignal.timeout(20000),
     });
   } catch (_) { fail("failed", "无法连接网易云音乐，请检查网络或稍后重试", true); }
@@ -75,7 +95,11 @@ export async function api(path, data = {}, options = {}) {
     fail("failed", t("网易云服务暂时不可用（HTTP {status}），请稍后重试", { status: response.status }), response.status === 429 || response.status >= 500);
   }
   let result;
-  try { result = await response.json(); }
+  try {
+    // Some NOS resource IDs are bare 64-bit integers and cannot round-trip through a JS Number.
+    result = options.cloudIds ? JSON.parse((await response.text())
+      .replace(/("(?:songId|resourceId)"\s*:\s*)(\d+)(?=\s*[,}])/g, '$1"$2"')) : await response.json();
+  }
   catch (_) { fail("failed", "网易云返回了无法识别的响应，请稍后重试", true); }
   const code = Number(result.code ?? 200);
   // 扫码的等待、已扫码、过期状态不是通用接口错误。

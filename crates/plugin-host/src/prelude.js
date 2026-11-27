@@ -7,7 +7,8 @@ const callHost = (op, args = {}) => {
 globalThis.console = Object.freeze({log(){},info(){},warn(){},error(){},debug(){}});
 globalThis.host = Object.freeze({
   storage:Object.freeze({get:key=>callHost('get',{key}),set:(key,value)=>callHost('set',{key,value:value??null}),remove:key=>callHost('remove',{key})}),
-  crypto:Object.freeze({md5:text=>callHost('md5',{text:String(text)}),aesEcbEncrypt:(key,text)=>callHost('aes',{key,text})}),
+  crypto:Object.freeze({md5:text=>callHost('md5',{text:String(text)}),aesEcbEncrypt:(key,text)=>callHost('aes',{key,text}),
+    randomKey:()=>callHost('randomKey'),aesCbcEncrypt:(key,iv,text)=>callHost('aesCbc',{key,iv,text})}),
   mediaAllowed:url=>callHost('mediaAllowed',{url:String(url)}),
   setting:key=>callHost('setting',{key}), language:()=> 'zh-CN', t:text=>String(text),
   signInPrompt:prompt=>callHost('prompt',{prompt:prompt??null}),
@@ -49,7 +50,7 @@ globalThis.__dispatch=async(op,args,source)=>{
   if(op==='browse'&&!a.page&&a.id)a.page=a.id;
   if(typeof p[op]!=='function')throw Object.assign(new Error('插件不支持 '+op),{code:'unsupported'});
   const v=await p[op](a);
-  if(['account','signIn','signOut','stream','download','lyrics','suggest','like','saveAlbum','isLiked','menuAction','trackMenu'].includes(op))return v??null;
+  if(['account','signIn','signOut','stream','download','cloudUpload','lyrics','suggest','like','saveAlbum','isLiked','menuAction','trackMenu'].includes(op))return v??null;
   let items=[],links=[],title=v?.title||({search:'搜索结果',liked:'喜欢的歌曲',playlists:'我的歌单',savedAlbums:'收藏专辑',recent:'最近播放'}[op]||'音乐');
   const add=container=>{for(const [kind,key]of Object.entries(plural))for(const x of(container?.[key]||[]))items.push(item(x,kind,source));for(const x of(container?.links||[]))links.push({title:x.title||'',op:'browse',args:{page:x.page||''}})};
   let more=!!v?.more,offset=args.offset||0;
