@@ -57,10 +57,9 @@ impl Search {
         })
     }
 
-    pub fn replacements(plugins: &[(Manifest, bool)], original: &str, include_local: bool) -> Self {
+    pub fn replacements(plugins: &[(Manifest, bool)], original: &str, details: bool) -> Self {
         let mut search = Self::new(plugins, "local", "track").unwrap_or_default();
-        search.sources.retain(|s| s.id != original);
-        if include_local && original != "local" {
+        if details {
             search.sources.insert(
                 0,
                 Source {
@@ -75,6 +74,8 @@ impl Search {
                     error: None,
                 },
             );
+        } else {
+            search.sources.retain(|s| s.id != original);
         }
         search
     }

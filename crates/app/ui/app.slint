@@ -266,9 +266,7 @@ export component AppWindow inherits Window {
     in property <[string]> import-filter-sources;
     in-out property <int> import-filter-index;
     in property <TrackDetails> track-details;
-    out property <bool> choosing-version: root.import-step == ImportStep.matching
-        || (root.import-step == ImportStep.details && root.import-filter-sources.length > 1
-            && (!root.track-details.playable || root.import-filter-index > 0));
+    out property <bool> choosing-version: root.import-step == ImportStep.matching || root.import-step == ImportStep.details;
     in property <bool> import-more;
     callback import-action(string, int);
     in property <[Row]> queue;
@@ -973,7 +971,7 @@ export component AppWindow inherits Window {
                     }
                     if root.import-more: ActionButton {text:"更多结果 / 重试";enabled:!root.import-busy;clicked=>{root.import-action("more", 0);}}
                 }}
-                if root.import-step == ImportStep.confirm || (view.details && !root.choosing-version): Rectangle {vertical-stretch:1;}
+                if root.import-step == ImportStep.confirm: Rectangle {vertical-stretch:1;}
                 HorizontalLayout {alignment:end;spacing:8px;
                     if root.import-step == ImportStep.form: ActionButton {text:"导入";primary:true;enabled:!root.import-busy && root.import-sources.length > 0 && root.import-id != "";clicked=>{root.import-action("submit", 0);}}
                     if root.import-step == ImportStep.confirm: ActionButton {text:"保留原曲并完成";clicked=>{root.import-action("close", 0);}}

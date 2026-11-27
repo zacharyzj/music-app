@@ -246,8 +246,8 @@ impl Library {
                 && !replacement.unavailable
                 && !replacement.key.id.is_empty()
                 && !replacement.key.source.is_empty()
-                && replacement.key.source != original.source,
-            "请选择其他音乐源中可播放的歌曲"
+                && (!unavailable_only || replacement.key.source != original.source),
+            "请选择可播放的候选歌曲"
         );
         if replacement.key.source == "local" {
             ensure!(
@@ -262,6 +262,18 @@ impl Library {
 
     pub fn replace_liked_track(&mut self, original: &ResourceKey, replacement: Item) -> Result<()> {
         let member = self.replacement_member(original, replacement, false)?;
+        if let Member::Plugin(t) = &member
+            && t.key == *original
+        {
+            ensure!(
+                self.db.execute(
+                    "UPDATE liked_plugin_tracks SET data=?3 WHERE source=?1 AND id=?2",
+                    params![original.source, original.id, serde_json::to_string(t)?]
+                )? == 1,
+                "原曲已不在本地喜欢的歌曲中"
+            );
+            return Ok(());
+        }
         let tx = self
             .db
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -291,7 +303,9 @@ impl Library {
                 })
                 .context("原曲已变更，请重新打开歌单")?;
             let new_key = new_member.key();
-            if let Some(existing) = members.iter().position(|m| m.key() == new_key) {
+            if let Some(existing) = members.iter().position(|m| m.key() == new_key)
+                && existing != i
+            {
                 members[existing] = new_member;
                 members.remove(i);
             } else {

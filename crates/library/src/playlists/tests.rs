@@ -36,6 +36,12 @@ fn local_favorites_filter_all_tracks_and_change_only_the_saved_favorite() -> Res
     assert!(page.items[0].unavailable);
     assert_eq!(page.items.last().unwrap().key.id, "104");
 
+    let mut refreshed = first.clone();
+    refreshed.title = "更新后的曲名".into();
+    db.replace_liked_track(&first.key, refreshed.clone())?;
+    let position = page.items.iter().position(|t| t.key == first.key).unwrap();
+    assert_eq!(db.liked_items()?[position].title, refreshed.title);
+
     // A failed write must leave the original available for another attempt.
     db.db.execute_batch("CREATE TRIGGER fail_save BEFORE INSERT ON liked_plugin_tracks BEGIN SELECT RAISE(ABORT,'write failed'); END;")?;
     assert!(

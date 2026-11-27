@@ -353,30 +353,72 @@ fn imports_with_installed_plugins_and_only_replaces_after_manual_selection() -> 
     let choices = ui.get_import_filter_sources().iter().collect::<Vec<_>>();
     assert_eq!(
         choices,
-        ["other（当前）", "本地音乐", "another", "original"]
+        [
+            "全部可选来源",
+            "本地音乐",
+            "another",
+            "original",
+            "other（当前）"
+        ]
     );
-    action("filter", 2);
-    finish("import-search")?;
-    action("preview", 0);
-    let preview = receive("resolve")?;
-    assert_eq!(preview.source, "another");
-    assert_eq!(preview.args["id"], "same");
-    assert_eq!(saved()?[1].key.source, "other");
-    action("filter", 0);
-    assert_eq!(ui.get_import_candidates().row_count(), 0);
-    action("preview", 0);
-    assert_eq!(state.borrow().play_generation, preview.generation);
-    action("choose", 0);
-    assert!(!ui.get_import_busy());
-    action("filter", 2);
+    assert_eq!(ui.get_import_filter_index(), 4);
+    assert!(ui.get_choosing_version());
+    let current = receive("import-search")?;
+    assert_eq!(current.source, "other");
+    state
+        .borrow_mut()
+        .finish_import_reply(&ui, &jobs, &genr, current);
+    assert_eq!(
+        ui.get_import_candidates().row_data(0).unwrap().resource,
+        "other:same"
+    );
     action("choose", 0);
     finish("import-change-source")?;
+    assert_eq!(ui.get_import_step(), ImportStep::Closed);
+    assert_eq!(saved()?.len(), 2);
+    state
+        .borrow_mut()
+        .open_track_details(&ui, &jobs, saved()?[1].clone());
+    finish("import-search")?;
+    ui.set_import_query("Lost Singer".into());
+    action("search", 0);
+    finish("import-search")?;
+    assert_eq!(ui.get_import_filter_index(), 4);
+    assert!(ui.get_import_more());
+    action("more", 0);
+    finish("import-search")?;
+    action("preview", 1);
+    let preview = receive("resolve")?;
+    assert_eq!(preview.source, "other");
+    assert_eq!(preview.args["id"], "later");
     assert_eq!(ui.get_import_step(), ImportStep::Details);
-    assert_eq!(ui.get_track_details().source, "another");
-    assert_eq!(ui.get_import_filter_index(), 0);
+    assert_eq!(saved()?[1].key.id, "same");
+    let playlist = state
+        .borrow_mut()
+        .import
+        .playlist_id
+        .replace("deleted".into());
+    action("choose", 1);
+    finish("import-change-source")?;
+    assert_eq!(ui.get_import_step(), ImportStep::Details);
+    assert!(!ui.get_import_busy());
+    assert_eq!(saved()?[1].key.id, "same");
+    state.borrow_mut().import.playlist_id = playlist;
+    action("choose", 1);
+    finish("import-change-source")?;
+    assert_eq!(ui.get_import_step(), ImportStep::Closed);
+    assert_eq!(saved()?[1].key.id, "later");
+    state
+        .borrow_mut()
+        .open_track_details(&ui, &jobs, saved()?[1].clone());
+    finish("import-search")?;
+    action("filter", 2);
+    finish("import-search")?;
+    assert_eq!(ui.get_import_step(), ImportStep::Details);
+    action("choose", 0);
+    finish("import-change-source")?;
+    assert_eq!(ui.get_import_step(), ImportStep::Closed);
     assert_eq!(saved()?[1].key.source, "another");
-    assert!(!ui.get_choosing_version());
-    action("close", 0);
 
     // A disabled source opens the alternatives immediately, using the saved song as the query.
     let mut s = state.borrow_mut();
@@ -407,7 +449,6 @@ fn imports_with_installed_plugins_and_only_replaces_after_manual_selection() -> 
     finish("import-change-source")?;
     assert_eq!(saved()?[1].key.source, "other");
     assert!(!ui.get_choosing_version());
-    action("close", 0);
     assert_eq!(ui.get_import_step(), ImportStep::Closed);
 
     let mut favorite = saved()?[1].clone();
@@ -423,6 +464,7 @@ fn imports_with_installed_plugins_and_only_replaces_after_manual_selection() -> 
     ui.set_local_playlist_kind(LocalPlaylistKind::Favorites);
     s.open_track_details(&ui, &jobs, favorite);
     drop(s);
+    finish("import-search")?;
     let source = ui
         .get_import_filter_sources()
         .iter()
@@ -436,7 +478,7 @@ fn imports_with_installed_plugins_and_only_replaces_after_manual_selection() -> 
     let liked: Page = serde_json::from_value(reload.value.unwrap())?;
     assert_eq!(liked.items.len(), 1);
     assert_eq!(liked.items[0].key.source, "original");
-    assert_eq!(ui.get_track_details().source, "original");
+    assert_eq!(ui.get_import_step(), ImportStep::Closed);
     assert_eq!(ui.get_current_favorite(), FavoriteState::Unliked);
     assert_eq!(saved()?[1].key.source, "other");
     Ok(())

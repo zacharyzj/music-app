@@ -276,7 +276,6 @@ impl UiState {
             playable: !display.disabled,
         });
         ui.set_import_query(format!("{} {}", t.title, t.artist).trim().into());
-        self.import.search = None;
         self.search_replacements(ui, jobs);
     }
 
@@ -307,24 +306,29 @@ impl UiState {
             return;
         };
         let details = ui.get_import_step() == ImportStep::Details;
-        let previous = self
-            .import
-            .search
-            .as_ref()
-            .and_then(|s| s.selected.and_then(|i| s.sources.get(i)));
-        let mut search = search::Search::replacements(&self.plugins, &original.key.source, details);
-        search.selected =
-            previous.and_then(|old| search.sources.iter().position(|s| s.id == old.id));
-        let first = if details && ui.get_track_details().playable {
-            format!("{}（当前）", self.source_name(&original.key.source))
-        } else if details {
-            "全部可选来源".into()
-        } else {
-            "全部来源".into()
+        let selected = match &self.import.search {
+            Some(search) => search.selected.map(|i| search.sources[i].id.as_str()),
+            None if details && ui.get_track_details().playable => {
+                Some(original.key.source.as_str())
+            }
+            None => None,
         };
-        ui.set_import_filter_sources(labels(
-            std::iter::once(first).chain(search.sources.iter().map(|s| s.name.clone())),
-        ));
+        let mut search = search::Search::replacements(&self.plugins, &original.key.source, details);
+        search.selected = selected.and_then(|id| search.sources.iter().position(|s| s.id == id));
+        let first = if details {
+            "全部可选来源"
+        } else {
+            "全部来源"
+        };
+        ui.set_import_filter_sources(labels(std::iter::once(first.to_owned()).chain(
+            search.sources.iter().map(|s| {
+                if details && s.id == original.key.source {
+                    format!("{}（当前）", s.name)
+                } else {
+                    s.name.clone()
+                }
+            }),
+        )));
         ui.set_import_filter_index(search.selected.map_or(0, |i| i as i32 + 1));
         self.import.ticket = self.import.ticket.wrapping_add(1);
         self.import.query = ui.get_import_query().trim().to_owned();
@@ -336,7 +340,7 @@ impl UiState {
         let Some(search) = &mut self.import.search else {
             return;
         };
-        if !self.import.query.is_empty() && ui.get_choosing_version() {
+        if !self.import.query.is_empty() {
             let pages = if first_only {
                 search.first_requests()
             } else {
@@ -359,19 +363,6 @@ impl UiState {
         let Some(search) = &self.import.search else {
             return;
         };
-        if !ui.get_choosing_version() {
-            ui.set_import_candidates(ModelRc::default());
-            ui.set_import_more(false);
-            ui.set_import_status(
-                if search.sources.is_empty() {
-                    "没有其他可切换的来源"
-                } else {
-                    ""
-                }
-                .into(),
-            );
-            return;
-        }
         let rows = search
             .visible(false)
             .map(|track| {
@@ -524,17 +515,18 @@ impl UiState {
             }
             "import-change-source" | "import-change-liked-source" => {
                 let favorites = reply.op == "import-change-liked-source";
-                if let Ok(mut track) = serde_json::from_value::<Item>(reply.args["track"].clone()) {
+                if favorites
+                    && let Some(original) = self.import.missing.front()
+                    && let Ok(mut track) =
+                        serde_json::from_value::<Item>(reply.args["track"].clone())
+                {
                     track.use_local_favorites = track.key.source != "local";
-                    if favorites && let Some(original) = self.import.missing.front() {
-                        self.likes
-                            .insert(favorites::FavoriteKey::of(original), false);
-                        self.likes.insert(favorites::FavoriteKey::of(&track), true);
-                        self.refresh_hearts(ui);
-                    }
-                    self.import.missing = VecDeque::from([track]);
-                    self.show_track_details(ui, jobs);
+                    self.likes
+                        .insert(favorites::FavoriteKey::of(original), false);
+                    self.likes.insert(favorites::FavoriteKey::of(&track), true);
+                    self.refresh_hearts(ui);
                 }
+                self.close_import(ui, jobs, generation);
                 let page = if favorites { "liked" } else { "playlist" };
                 if self.page_source == "local"
                     && self.last.op == page
@@ -633,9 +625,6 @@ pub(super) fn install(
                 s.start_matching(&ui, &jobs, &generation);
             }
             (step @ (ImportStep::Matching | ImportStep::Details), "preview" | "choose") => {
-                if !ui.get_choosing_version() {
-                    return;
-                }
                 let Some(track) = s
                     .import
                     .search
@@ -647,7 +636,7 @@ pub(super) fn install(
                 let Some(original) = s.import.missing.front() else {
                     return;
                 };
-                if track.key.source == original.key.source || !playable(track, &s.plugins) {
+                if !playable(track, &s.plugins) {
                     return;
                 }
                 if action == "preview" {
