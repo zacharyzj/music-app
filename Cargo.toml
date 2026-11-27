@@ -4,7 +4,7 @@ members = ["crates/core", "crates/plugin-sdk", "crates/plugin-host", "crates/lib
 default-members = ["crates/app"]
 
 [workspace.package]
-version = "0.2.15"
+version = "0.2.16"
 edition = "2024"
 
 [workspace.dependencies]
