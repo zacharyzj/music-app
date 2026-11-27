@@ -219,6 +219,8 @@ fn playback(url: &str, referrer: Option<&str>) -> Result<()> {
     let player = Player::start(Some(&path));
     player.commands.send(Command::Volume(10.0))?;
     player.commands.send(Command::Open {
+        generation: 0,
+        start: Default::default(),
         url: url.into(),
         referrer: referrer.map(str::to_owned),
         video: None,
@@ -233,7 +235,10 @@ fn playback(url: &str, referrer: Option<&str>) -> Result<()> {
                 let _ = player.commands.send(Command::Quit);
                 bail!("{e}")
             }
-            Ok(PlayerEvent::Position(p, d, _)) if p > 0.2 && d > 0.0 => {
+            Ok(PlayerEvent::Position(clock))
+                if clock.start.position > 0.2 && clock.duration > 0.0 =>
+            {
+                let (p, d) = (clock.start.position, clock.duration);
                 if !paused {
                     player.commands.send(Command::Pause(true))?;
                     player.commands.send(Command::Seek(1.0))?;

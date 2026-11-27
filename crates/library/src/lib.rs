@@ -331,30 +331,7 @@ impl Library {
                 Ok(Value::Object(result))
             }
             "like" => {
-                let source = a["trackSource"].as_str().unwrap_or("local");
-                if source != "local" {
-                    if a["on"] == true {
-                        let track: Item = serde_json::from_value(a["track"].clone())?;
-                        anyhow::ensure!(
-                            track.kind == "track"
-                                && track.key.source == source
-                                && track.key.id == id
-                                && !id.is_empty(),
-                            "歌曲信息不匹配"
-                        );
-                        self.db.execute("INSERT INTO liked_plugin_tracks(source,id,data) VALUES(?1,?2,?3) ON CONFLICT(source,id) DO UPDATE SET data=excluded.data", params![source,id,serde_json::to_string(&track)?])?;
-                    } else {
-                        self.db.execute(
-                            "DELETE FROM liked_plugin_tracks WHERE source=?1 AND id=?2",
-                            params![source, id],
-                        )?;
-                    }
-                } else if a["on"] == true {
-                    self.db
-                        .execute("INSERT OR IGNORE INTO liked VALUES(?1)", [id])?;
-                } else {
-                    self.db.execute("DELETE FROM liked WHERE id=?1", [id])?;
-                }
+                self.edit_like(id, &a)?;
                 Ok(Value::Null)
             }
             "createPlaylist" => {
@@ -400,27 +377,12 @@ impl Library {
                 a["offset"].as_u64().unwrap_or(0),
             ),
             _ => {
-                let (mut title, mut tracks) = if r.op == "playlist" {
-                    self.playlist_items(id)?
-                } else {
-                    ("本地音乐".to_string(), self.tracks()?)
+                let (mut title, mut tracks) = match r.op.as_str() {
+                    "playlist" => self.playlist_items(id)?,
+                    "liked" => ("喜欢的歌曲".into(), self.liked_items()?),
+                    _ => ("本地音乐".into(), self.tracks()?),
                 };
                 match r.op.as_str() {
-                    "liked" => {
-                        let ids: HashSet<String> = self
-                            .db
-                            .prepare("SELECT id FROM liked")?
-                            .query_map([], |r| r.get(0))?
-                            .collect::<std::result::Result<_, _>>()?;
-                        tracks.retain(|v| ids.contains(&v.key.id));
-                        let mut saved = self
-                            .db
-                            .prepare("SELECT data FROM liked_plugin_tracks ORDER BY rowid")?;
-                        for data in saved.query_map([], |r| r.get::<_, String>(0))? {
-                            tracks.push(serde_json::from_str(&data?)?);
-                        }
-                        title = "喜欢的歌曲".into();
-                    }
                     "album" => {
                         tracks.retain(|v| format!("{}\u{1f}{}", v.artist, v.album) == id);
                         title = tracks.first().map(|v| v.album.clone()).unwrap_or_default();
@@ -429,7 +391,7 @@ impl Library {
                         tracks.retain(|v| v.artist == id);
                         title = id.into();
                     }
-                    "home" | "search" | "library" | "playlist" => {}
+                    "home" | "search" | "library" | "playlist" | "liked" => {}
                     _ => anyhow::bail!("不支持此本地操作"),
                 }
                 let query = a["query"].as_str().unwrap_or("").to_lowercase();
@@ -470,8 +432,8 @@ impl Library {
                         .collect();
                 }
                 let offset = a["offset"].as_u64().unwrap_or(0);
-                // The album's playback queue is built from this page, including long box sets.
-                let limit = if matches!(r.op.as_str(), "album" | "playlist") {
+                // Album playback and playlist filtering need the entire collection.
+                let limit = if matches!(r.op.as_str(), "album" | "playlist" | "liked") {
                     tracks.len()
                 } else {
                     100

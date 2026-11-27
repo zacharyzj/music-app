@@ -344,7 +344,7 @@ fn imports_with_installed_plugins_and_only_replaces_after_manual_selection() -> 
     s.update_rows(&ui);
     assert!(!ui.get_rows().row_data(1).unwrap().disabled);
     s.last = Request::new("playlist", json!({"id":dest.key.id}));
-    ui.set_local_playlist(true);
+    ui.set_local_playlist_kind(LocalPlaylistKind::Custom);
     s.open_track_details(&ui, &jobs, items[1].clone());
     drop(s);
     assert_eq!(ui.get_import_step(), ImportStep::Details);
@@ -408,5 +408,35 @@ fn imports_with_installed_plugins_and_only_replaces_after_manual_selection() -> 
     assert!(!ui.get_choosing_version());
     action("close", 0);
     assert_eq!(ui.get_import_step(), ImportStep::Closed);
+
+    let mut favorite = saved()?[1].clone();
+    favorite.use_local_favorites = true;
+    library.lock().unwrap().call(Request::new(
+        "like",
+        json!({"on":true,"id":favorite.key.id,"trackSource":favorite.key.source,"track":favorite}),
+    ))?;
+    let mut s = state.borrow_mut();
+    s.last = Request::new("liked", json!({}));
+    s.now_playing = Some(favorite.clone());
+    s.likes.insert(favorites::FavoriteKey::of(&favorite), true);
+    ui.set_local_playlist_kind(LocalPlaylistKind::Favorites);
+    s.open_track_details(&ui, &jobs, favorite);
+    drop(s);
+    let source = ui
+        .get_import_filter_sources()
+        .iter()
+        .position(|s| s == "original")
+        .unwrap();
+    action("filter", source as i32);
+    finish("import-search")?;
+    action("choose", 0);
+    finish("import-change-liked-source")?;
+    let reload = receive("liked")?;
+    let liked: Page = serde_json::from_value(reload.value.unwrap())?;
+    assert_eq!(liked.items.len(), 1);
+    assert_eq!(liked.items[0].key.source, "original");
+    assert_eq!(ui.get_track_details().source, "original");
+    assert_eq!(ui.get_current_favorite(), FavoriteState::Unliked);
+    assert_eq!(saved()?[1].key.source, "other");
     Ok(())
 }

@@ -264,7 +264,13 @@ impl UiState {
     }
 
     pub(super) fn clear_now_playing(&mut self, ui: &AppWindow) {
+        if !self.previewing {
+            self.resume = None;
+        }
         self.now_playing = None;
+        resume::set_timeline(ui, 0., 0.);
+        ui.set_current_has_video(false);
+        ui.set_video_frame(slint::Image::default());
         self.previewing = false;
         ui.set_version_preview(VersionPreview::default());
         self.checking_current_like = false;

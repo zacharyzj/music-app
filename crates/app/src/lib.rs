@@ -6,6 +6,7 @@ mod local_playlist;
 mod navigation;
 mod playlist_import;
 mod preferences;
+mod resume;
 mod search;
 mod sound;
 #[cfg(all(test, feature = "ui-smoke"))]
@@ -14,13 +15,14 @@ mod test_ui;
 #[cfg(not(target_os = "android"))]
 mod tray;
 mod updates;
+mod video_page;
 #[cfg(windows)]
 mod window_behavior;
 mod workers;
 use anyhow::Result;
 use music_core::*;
 use music_library::Library;
-use music_player::{Command, Player, PlayerEvent, Video};
+use music_player::{Command, PlaybackStart, Player, PlayerEvent, Video};
 use music_plugin_host::{catalog, manifest};
 use preferences::PlaybackSettings;
 use serde_json::{Value, json};
@@ -79,6 +81,7 @@ struct UiState {
     pending_likes: HashSet<favorites::FavoriteKey>,
     // The song shown in the player bar can differ from the queue cursor in heartbeat mode.
     now_playing: Option<Item>,
+    resume: Option<resume::ResumePoint>,
     checking_current_like: bool,
     next_offset: u64,
     queue: Queue,
@@ -100,6 +103,7 @@ struct UiState {
     previewing: bool,
     loaded: Option<ResourceKey>,
     play_generation: u64,
+    video_page: video_page::VideoPage,
 }
 fn has_capability(plugins: &[(Manifest, bool)], id: &str, cap: &str) -> bool {
     plugins
@@ -125,6 +129,7 @@ impl UiState {
             likes: HashMap::new(),
             pending_likes: HashSet::new(),
             now_playing: None,
+            resume: None,
             checking_current_like: false,
             next_offset: 0,
             queue,
@@ -146,11 +151,17 @@ impl UiState {
             previewing: false,
             loaded: None,
             play_generation: 0,
+            video_page: Default::default(),
         }
     }
 
     fn toggle_pause(&mut self, ui: &AppWindow, player: &mpsc::Sender<Command>) {
         self.playing = !self.playing;
+        if !self.previewing
+            && let Some(point) = &mut self.resume
+        {
+            point.start.paused = !self.playing;
+        }
         let _ = player.send(Command::Pause(!self.playing));
         ui.set_playing(self.playing);
     }
@@ -162,8 +173,8 @@ impl UiState {
             self.heartbeat_resolved();
         }
         self.loaded = Some(key);
-        self.playing = true;
-        ui.set_playing(true);
+        self.playing = !self.playback_start().paused;
+        ui.set_playing(self.playing);
     }
 
     fn playback_ended(
@@ -175,10 +186,16 @@ impl UiState {
         self.loaded = None;
         self.playing = false;
         ui.set_playing(false);
+        ui.set_video_ended(ui.get_current_has_video());
+        let duration = ui.get_duration() as f64;
+        resume::set_timeline(ui, duration, duration);
         if std::mem::take(&mut self.previewing) {
             ui.set_version_preview(VersionPreview::default());
-        } else if let Some(item) = self.advance_track(true, jobs) {
-            play(ui, self, jobs, player, item, PlayKind::Audio);
+        } else {
+            self.resume = None;
+            if let Some(item) = self.advance_track(true, jobs) {
+                play(ui, self, jobs, player, item, PlayKind::Audio);
+            }
         }
     }
 
@@ -208,7 +225,7 @@ impl UiState {
         ui.set_can_download(false);
         ui.set_home_page(false);
         ui.set_album_detail(false);
-        ui.set_local_playlist(false);
+        ui.set_local_playlist_kind(LocalPlaylistKind::None);
         ui.set_remote_playlist(false);
         ui.set_has_error(false);
     }
@@ -238,7 +255,7 @@ impl UiState {
                 result.liked = item.kind == "track" && self.is_liked(&favorite);
                 result.like_pending =
                     item.kind == "track" && self.pending_likes.contains(&favorite);
-                if self.last.op == "playlist" && self.page_source == "local" {
+                if ui.get_local_playlist() {
                     result.subtitle = [
                         Some(self.source_name(&item.key.source)),
                         unavailable_reason(item, &self.plugins),
@@ -631,9 +648,10 @@ fn refresh_queue(ui: &AppWindow, state: &UiState) {
             .collect::<Vec<_>>(),
     )));
 }
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq)]
 enum PlayKind {
     Audio,
+    Resume(PlaybackStart),
     Video,
     Preview,
 }
@@ -661,6 +679,12 @@ fn play(
         return;
     }
     state.play_generation += 1;
+    ui.set_video_ended(false);
+    ui.set_current_has_video(has_capability(&state.plugins, &item.key.source, "video"));
+    ui.set_video_frame(slint::Image::default());
+    if kind == PlayKind::Video {
+        ui.set_show_lyrics(false);
+    }
     state.previewing = kind == PlayKind::Preview;
     if state.previewing {
         state.cancel_heartbeat_advance();
@@ -674,12 +698,28 @@ fn play(
         ui.set_version_preview(VersionPreview::default());
     }
     let mut args = json!({"id":item.key.id});
+    let start = match kind {
+        PlayKind::Resume(start) => start,
+        PlayKind::Video if state.loaded.as_ref() == Some(&item.key) => PlaybackStart {
+            position: ui.get_position() as f64,
+            paused: false,
+        },
+        _ => PlaybackStart::default(),
+    };
     if kind == PlayKind::Video {
         args["video"] = json!(true);
-        if state.loaded.as_ref() == Some(&item.key) {
-            args["start"] = json!(ui.get_position());
-        }
     }
+    if !state.previewing {
+        state.resume = Some(resume::ResumePoint {
+            item: item.clone(),
+            start,
+        });
+    }
+    resume::set_timeline(
+        ui,
+        start.position,
+        (item.duration_ms as f64 / 1000.).max(start.position),
+    );
     state.loaded = None;
     state.playing = false;
     ui.set_playing(false);
@@ -765,6 +805,7 @@ pub fn run_at(root: PathBuf) -> Result<()> {
     if initial.muted {
         ui.invoke_set_player_volume(0.);
     }
+    let resume_point = resume::ResumePoint::read(&library);
     let restored: Queue = serde_json::from_value(library.get("queue")).unwrap_or_default();
     ui.set_dark(library.get("dark").as_bool().unwrap_or(true));
     ui.set_playback_mode(restored.playback_mode().into());
@@ -801,6 +842,7 @@ pub fn run_at(root: PathBuf) -> Result<()> {
         std::env::var_os("MUSIC_API_MPV").as_deref().map(Path::new),
     ));
     let ptx = player.commands.clone();
+    video_page::install(&ui, state.clone(), player.clone(), preferences.clone());
     playlist_import::install(
         &ui,
         state.clone(),
@@ -818,6 +860,9 @@ pub fn run_at(root: PathBuf) -> Result<()> {
             .map_or("local", |l| l.source.as_str())
             .to_owned();
         s.open_source(&ui, &tx, &generation, &source, location);
+        if let Some(point) = resume_point {
+            point.restore(&ui, &mut s, &tx, &ptx);
+        }
         refresh_queue(&ui, &s);
         s.schedule_downloads(&ui, &tx, &generation);
     }
@@ -1091,7 +1136,13 @@ pub fn run_at(root: PathBuf) -> Result<()> {
             "pause" => {
                 s.cancel_heartbeat_advance();
                 if s.loaded.is_none() {
-                    if let Some(t) = s
+                    if let Some(point) = s.resume.clone().filter(|_| !s.previewing) {
+                        let start = PlaybackStart {
+                            paused: false,
+                            ..point.start
+                        };
+                        play(&ui, &mut s, &job, &pc, point.item, PlayKind::Resume(start));
+                    } else if let Some(t) = s
                         .queue
                         .index
                         .and_then(|i| s.queue.items.get(i).cloned())
@@ -1366,8 +1417,17 @@ pub fn run_at(root: PathBuf) -> Result<()> {
         }
     });
     let pc = ptx.clone();
+    let st = state.clone();
     ui.on_seek(move |v| {
-        let _ = pc.send(Command::Seek(v as f64));
+        let mut s = st.borrow_mut();
+        if !s.previewing
+            && let Some(point) = &mut s.resume
+        {
+            point.start.position = v.max(0.) as f64;
+        }
+        if s.loaded.is_some() {
+            let _ = pc.send(Command::Seek(v as f64));
+        }
     });
     let pc = ptx.clone();
     let levels = preferences.clone();
@@ -1458,6 +1518,7 @@ pub fn run_at(root: PathBuf) -> Result<()> {
     let mut capture_download = std::env::var_os("MUSIC_API_CAPTURE_DOWNLOAD").is_some();
     let mut saved = Instant::now();
     let mut last_location = Value::Null;
+    let mut last_resume = Value::Null;
     let mut catalog_file: Option<tempfile::NamedTempFile> = None;
     let settings = preferences.clone();
     let last_written = saved_preferences.clone();
@@ -1469,6 +1530,7 @@ pub fn run_at(root: PathBuf) -> Result<()> {
         move || {
             let Some(ui) = weak.upgrade() else { return };
             let mut s = st.borrow_mut();
+            s.sync_video_page(&ui, &job, &pc);
             let normalization = s.normalization();
             if normalization != last_normalization {
                 let _ = pc.send(Command::Normalize(normalization.clone()));
@@ -1510,6 +1572,10 @@ pub fn run_at(root: PathBuf) -> Result<()> {
                 }
             }
             while let Ok(reply) = out_rx.try_recv() {
+                if reply.op == "resolve" && reply.args["inline"].is_u64() {
+                    s.finish_video_page(&ui, reply, &pc, settings.get());
+                    continue;
+                }
                 if reply.op.starts_with("import-") {
                     s.finish_import_reply(&ui, &job, &genr, reply);
                     continue;
@@ -1698,20 +1764,20 @@ pub fn run_at(root: PathBuf) -> Result<()> {
                             if let Some(url) = v["url"].as_str() {
                                 let _ = pc.send(Command::Normalize(s.normalization()));
                                 let _ = pc.send(Command::Open {
+                                    generation: s.play_generation,
+                                    start: s.playback_start(),
                                     gains: music_player::Gains::from_stream(&v),
                                     url: url.into(),
                                     referrer: v["referrer"].as_str().map(str::to_owned),
                                     video: (reply.args["video"] == true).then(|| Video {
                                         audio_url: v["audioUrl"].as_str().map(str::to_owned),
                                         title: ui.get_now_title().to_string(),
-                                        start: reply.args["start"].as_f64().unwrap_or_default(),
                                         speed: settings.get().video_speed,
                                         preferred_height: settings.get().video_height,
                                         qualities: serde_json::from_value(v["qualities"].clone())
                                             .unwrap_or_default(),
                                     }),
                                 });
-                                let _ = pc.send(Command::Pause(false));
                                 s.stream_started(
                                     &ui,
                                     ResourceKey {
@@ -1844,14 +1910,8 @@ pub fn run_at(root: PathBuf) -> Result<()> {
                             s.request_current_like(&ui, &job);
                             refresh_queue(&ui, &s);
                             s.update_rows(&ui);
-                            if s.page_source == "local" && s.last.op == "playlist" {
-                                send(
-                                    &job,
-                                    &genr,
-                                    "local",
-                                    "playlist",
-                                    json!({"id":s.last.args["id"]}),
-                                );
+                            if ui.get_local_playlist() {
+                                send(&job, &genr, "local", &s.last.op, s.last.args.clone());
                             }
                             if s.online.is_some() && s.last.op == "search" && s.source == old_source
                             {
@@ -1881,7 +1941,7 @@ pub fn run_at(root: PathBuf) -> Result<()> {
                             }
                             if s.online.is_none()
                                 && s.page_source == "local"
-                                && matches!(s.last.op.as_str(), "library" | "search")
+                                && matches!(s.last.op.as_str(), "library" | "search" | "liked")
                             {
                                 send(&job, &genr, "local", &s.last.op, s.last.args.clone());
                             }
@@ -1952,8 +2012,12 @@ pub fn run_at(root: PathBuf) -> Result<()> {
                                 show_page_navigation(&ui, &mut s, links);
                                 ui.set_album_detail(reply.op == "album" && reply.source != "local");
                                 ui.set_home_page(reply.op == "home");
-                                ui.set_local_playlist(
-                                    reply.op == "playlist" && reply.source == "local",
+                                ui.set_local_playlist_kind(
+                                    match (reply.source.as_str(), reply.op.as_str()) {
+                                        ("local", "playlist") => LocalPlaylistKind::Custom,
+                                        ("local", "liked") => LocalPlaylistKind::Favorites,
+                                        _ => LocalPlaylistKind::None,
+                                    },
                                 );
                                 ui.set_remote_playlist(
                                     reply.op == "playlist" && reply.source != "local",
@@ -2106,6 +2170,7 @@ pub fn run_at(root: PathBuf) -> Result<()> {
             while let Ok(e) = live_player.events.try_recv() {
                 match e {
                     PlayerEvent::Ready => {}
+                    PlayerEvent::InlineError(ticket, e) => s.video_page.error(&ui, ticket, e),
                     PlayerEvent::Outputs(devices) => sound.borrow_mut().outputs(&ui, &pc, devices),
                     PlayerEvent::AudioError(e) => ui.invoke_notify_row(e.into()),
                     PlayerEvent::VideoControl(control) => {
@@ -2119,25 +2184,13 @@ pub fn run_at(root: PathBuf) -> Result<()> {
                         s.playing = false;
                         ui.set_playing(false);
                     }
-                    PlayerEvent::Position(p, d, paused) => {
-                        if s.loaded.is_some() && d > 0.0 && s.playing == paused {
-                            s.playing = !paused;
-                            ui.set_playing(!paused);
+                    PlayerEvent::Position(clock) => {
+                        if !s.record_clock(clock) {
+                            continue;
                         }
-                        if !ui.get_scrubbing() {
-                            ui.set_position(p as f32);
-                        }
-                        ui.set_duration(d as f32);
-                        ui.set_time_label(
-                            format!(
-                                "{:02}:{:02} / {:02}:{:02}",
-                                p as u64 / 60,
-                                p as u64 % 60,
-                                d as u64 / 60,
-                                d as u64 % 60
-                            )
-                            .into(),
-                        );
+                        let p = clock.start.position;
+                        ui.set_playing(s.playing);
+                        resume::set_timeline(&ui, p, clock.duration);
                         let current = s
                             .lines
                             .iter()
@@ -2155,8 +2208,12 @@ pub fn run_at(root: PathBuf) -> Result<()> {
                             .unwrap_or("");
                         ui.set_translated_lyric(translated.into());
                     }
-                    PlayerEvent::Ended if s.loaded.is_some() => s.playback_ended(&ui, &job, &pc),
-                    PlayerEvent::Ended => {}
+                    PlayerEvent::Ended(generation)
+                        if generation == s.play_generation && s.loaded.is_some() =>
+                    {
+                        s.playback_ended(&ui, &job, &pc)
+                    }
+                    PlayerEvent::Ended(_) => {}
                 }
             }
             if s.login_started
@@ -2190,11 +2247,16 @@ pub fn run_at(root: PathBuf) -> Result<()> {
             if saved.elapsed() > Duration::from_secs(3) {
                 saved = Instant::now();
                 let location = json!(navigation::Location::capture(&ui, &s));
-                if location != last_location
-                    && let Ok(db) = library.try_lock()
-                    && db.set(navigation::KEY, location.clone()).is_ok()
-                {
-                    last_location = location;
+                if let Ok(db) = library.try_lock() {
+                    if location != last_location
+                        && db.set(navigation::KEY, location.clone()).is_ok()
+                    {
+                        last_location = location;
+                    }
+                    let point = json!(s.resume);
+                    if point != last_resume && db.set(resume::KEY, point.clone()).is_ok() {
+                        last_resume = point;
+                    }
                 }
                 send(
                     &job,
@@ -2338,6 +2400,12 @@ pub fn run_at(root: PathBuf) -> Result<()> {
                 if let Some(ui) = window.upgrade() {
                     if ui.get_show_catalog() && ui.get_catalog_busy() && started.elapsed() < Duration::from_secs(120) { return; }
                     if ui.get_show_catalog() { eprintln!("Online catalog: rows={}, status={}",ui.get_catalog_rows().row_count(),ui.get_catalog_status()); }
+                    if ui.get_video_page() {
+                        let size = ui.get_video_frame().size();
+                        let options = ui.get_video_qualities();
+                        let choice = options.row_data(ui.get_video_quality_index() as usize).unwrap_or_default();
+                        eprintln!("Video page: {}x{}, quality={}, options={}, error={}", size.width, size.height, choice, options.row_count(), ui.get_video_error());
+                    }
                     if wait_for_download && !ui.get_has_error() && started.elapsed() < Duration::from_secs(120) &&
                         (ui.get_download_notice().is_empty() || ui.get_download_pending() > 0) { return; }
                     eprintln!(
@@ -2375,13 +2443,32 @@ pub fn run_at(root: PathBuf) -> Result<()> {
     }
     ui.run()?;
     cancel.store(true, Ordering::Relaxed);
-    let s = state.borrow();
+    let mut s = state.borrow_mut();
     let shutdown_db = Library::open(&root)?;
+    let clock = if !s.previewing && s.loaded.is_some() {
+        player.clock()
+    } else {
+        None
+    };
     for event in player.events.try_iter() {
-        if let PlayerEvent::VideoControl(control) = event {
-            PlaybackSettings::apply_video_control(&preferences, &ui, control);
+        match event {
+            PlayerEvent::VideoControl(control) => {
+                PlaybackSettings::apply_video_control(&preferences, &ui, control)
+            }
+            PlayerEvent::Position(clock) => {
+                s.record_clock(clock);
+            }
+            PlayerEvent::Ended(generation) if generation == s.play_generation && !s.previewing => {
+                s.resume = None;
+                s.loaded = None;
+            }
+            _ => {}
         }
     }
+    if let Some(clock) = clock {
+        s.record_clock(clock);
+    }
+    shutdown_db.set(resume::KEY, json!(s.resume))?;
     preferences
         .get()
         .save_changes(&shutdown_db, &saved_preferences)?;

@@ -1,5 +1,5 @@
 mod support;
-use music_app_ui::{AppWindow, Row, TrackDownloadState};
+use music_app_ui::{AppWindow, LocalPlaylistKind, Row, TrackDownloadState};
 use slint::platform::{Key, WindowEvent};
 use slint::{ComponentHandle, LogicalPosition, Model, PhysicalSize, VecModel};
 use std::{cell::RefCell, rc::Rc};
@@ -34,6 +34,9 @@ fn scrolled_track_actions_and_tooltips() -> anyhow::Result<()> {
     let events = Rc::new(RefCell::new(Vec::new()));
     let log = events.clone();
     ui.on_row_action(move |i, action| log.borrow_mut().push((i, action.to_string())));
+    let searches = Rc::new(RefCell::new(Vec::new()));
+    let log = searches.clone();
+    ui.on_search(move |text, kind| log.borrow_mut().push((text.to_string(), kind)));
 
     for (w, h, y, buttons, gap) in [
         (1240, 820, 210., [988., 1038., 1088., 1138., 1188.], 1063.),
@@ -56,7 +59,7 @@ fn scrolled_track_actions_and_tooltips() -> anyhow::Result<()> {
         row.liked = false;
         row.download_blocked = false;
         tracks.set_row_data(index, row.clone());
-        ui.set_local_playlist(false);
+        ui.set_local_playlist_kind(LocalPlaylistKind::None);
         advance(400);
         window.take_snapshot()?;
         let check_at = |x, y, expected: Option<&str>| {
@@ -132,15 +135,32 @@ fn scrolled_track_actions_and_tooltips() -> anyhow::Result<()> {
         check(buttons[2], None);
         check(buttons[3], Some("unlike"));
         check(buttons[4], Some("unlike"));
-        ui.set_local_playlist(true);
+        ui.set_search_text("全局关键词".into());
+        ui.set_search_kind(2);
+        ui.set_local_playlist_kind(LocalPlaylistKind::Custom);
+        ui.set_suggestions(["全局搜索建议".into()].into());
         window.take_snapshot()?;
-        let local_y = y + if w == 1240 { 50. } else { 44. };
+        let margin = if w == 1240 { 24. } else { 16. };
+        let search_x = w as f32 - margin - 16.;
+        let search_y = margin + 16.;
+        click(window, search_x, search_y);
+        assert!(searches.take().is_empty());
+        let (local_y, toolbar_y) = if w == 1240 {
+            (216., 126.)
+        } else {
+            (198., 114.)
+        };
         let detail_x = buttons[3];
         check_at(title_x, local_y, None);
         check_at(title_x, local_y, Some("open"));
         check_at(detail_x, local_y, Some("details"));
         check_at(buttons[4], local_y, Some("remove"));
-        let toolbar_y = y - 40.;
+        ui.set_local_playlist_kind(LocalPlaylistKind::Favorites);
+        window.take_snapshot()?;
+        check_at(detail_x, local_y, Some("details"));
+        check_at(buttons[4], local_y, Some("unlike"));
+        click(window, search_x, search_y);
+        assert!(searches.take().is_empty());
         click(window, w as f32 - 220., toolbar_y);
         window.dispatch_event(WindowEvent::KeyPressed { text: "m".into() });
         window.dispatch_event(WindowEvent::KeyReleased { text: "m".into() });
@@ -161,8 +181,11 @@ fn scrolled_track_actions_and_tooltips() -> anyhow::Result<()> {
         window.take_snapshot()?;
         check_at(title_x, local_y, Some("details"));
         check_at(detail_x, local_y, Some("details"));
-        ui.set_local_playlist(false);
+        ui.set_suggestions(Default::default());
+        ui.set_local_playlist_kind(LocalPlaylistKind::None);
         window.take_snapshot()?;
+        click(window, search_x, search_y);
+        assert_eq!(searches.take(), [("全局关键词".to_owned(), 2)]);
         check(title_x, None);
         check(title_x, None);
         unavailable.disabled = false;

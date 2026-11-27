@@ -25,9 +25,90 @@ impl Member {
             Self::Plugin(item) => item.key.clone(),
         }
     }
+
+    fn save_like(&self, db: &Connection) -> Result<()> {
+        match self {
+            Self::Local(id) => db.execute("INSERT OR IGNORE INTO liked(id) VALUES(?1)", [id])?,
+            Self::Plugin(t) => db.execute(
+                "INSERT INTO liked_plugin_tracks(source,id,data) VALUES(?1,?2,?3)
+                 ON CONFLICT(source,id) DO UPDATE SET data=excluded.data",
+                params![t.key.source, t.key.id, serde_json::to_string(t)?],
+            )?,
+        };
+        Ok(())
+    }
+}
+
+fn remove_like(db: &Connection, source: &str, id: &str) -> rusqlite::Result<usize> {
+    if source == "local" {
+        db.execute("DELETE FROM liked WHERE id=?1", [id])
+    } else {
+        db.execute(
+            "DELETE FROM liked_plugin_tracks WHERE source=?1 AND id=?2",
+            [source, id],
+        )
+    }
+}
+
+fn local_track(id: String, record: Option<(String, String)>) -> Result<Item> {
+    if let Some((data, path)) = record {
+        let mut item: Item = serde_json::from_str(&data)?;
+        item.unavailable |= !Path::new(&path).is_file();
+        return Ok(item);
+    }
+    Ok(Item {
+        key: ResourceKey {
+            source: "local".into(),
+            id: id.clone(),
+        },
+        kind: "track".into(),
+        title: id,
+        unavailable: true,
+        ..Default::default()
+    })
 }
 
 impl Library {
+    pub(super) fn edit_like(&self, id: &str, args: &Value) -> Result<()> {
+        let source = args["trackSource"].as_str().unwrap_or("local");
+        if args["on"] != true {
+            remove_like(&self.db, source, id)?;
+        } else if source == "local" {
+            Member::Local(id.to_owned()).save_like(&self.db)?;
+        } else {
+            let track: Item = serde_json::from_value(args["track"].clone())?;
+            ensure!(
+                track.kind == "track"
+                    && track.key.source == source
+                    && track.key.id == id
+                    && !id.is_empty(),
+                "歌曲信息不匹配"
+            );
+            Member::Plugin(Box::new(track)).save_like(&self.db)?;
+        }
+        Ok(())
+    }
+
+    pub(super) fn liked_items(&self) -> Result<Vec<Item>> {
+        let mut liked = self.db.prepare(
+            "SELECT l.id,t.data,t.path FROM liked l LEFT JOIN tracks t ON t.id=l.id
+             ORDER BY t.path IS NULL,t.path,l.rowid",
+        )?;
+        let mut items = Vec::new();
+        let mut rows = liked.query([])?;
+        while let Some(row) = rows.next()? {
+            let data: Option<String> = row.get(1)?;
+            items.push(local_track(row.get(0)?, data.zip(row.get(2)?))?);
+        }
+        let mut saved = self
+            .db
+            .prepare("SELECT data FROM liked_plugin_tracks ORDER BY rowid")?;
+        for data in saved.query_map([], |r| r.get::<_, String>(0))? {
+            items.push(serde_json::from_str(&data?)?);
+        }
+        Ok(items)
+    }
+
     pub(super) fn playlist_items(&self, id: &str) -> Result<(String, Vec<Item>)> {
         let (name, data): (String, String) =
             self.db
@@ -46,23 +127,7 @@ impl Library {
                     let row: Option<(String, String)> = local
                         .query_row([&id], |r| Ok((r.get(0)?, r.get(1)?)))
                         .optional()?;
-                    let item = if let Some((data, path)) = row {
-                        let mut item: Item = serde_json::from_str(&data)?;
-                        item.unavailable |= !Path::new(&path).is_file();
-                        item
-                    } else {
-                        Item {
-                            key: ResourceKey {
-                                source: "local".into(),
-                                id: id.clone(),
-                            },
-                            kind: "track".into(),
-                            title: id,
-                            unavailable: true,
-                            ..Default::default()
-                        }
-                    };
-                    items.push(item);
+                    items.push(local_track(id, row)?);
                 }
             }
         }
@@ -170,13 +235,12 @@ impl Library {
         })
     }
 
-    pub fn replace_playlist_track(
-        &mut self,
-        id: &str,
+    fn replacement_member(
+        &self,
         original: &ResourceKey,
         replacement: Item,
         unavailable_only: bool,
-    ) -> Result<()> {
+    ) -> Result<Member> {
         ensure!(
             replacement.kind == "track"
                 && !replacement.unavailable
@@ -185,15 +249,39 @@ impl Library {
                 && replacement.key.source != original.source,
             "请选择其他音乐源中可播放的歌曲"
         );
-        let new_member = if replacement.key.source == "local" {
+        if replacement.key.source == "local" {
             ensure!(
                 !unavailable_only && self.path(&replacement.key.id)?.is_file(),
                 "所选本地文件不可用"
             );
-            Member::Local(replacement.key.id.clone())
+            Ok(Member::Local(replacement.key.id))
         } else {
-            Member::Plugin(Box::new(replacement))
-        };
+            Ok(Member::Plugin(Box::new(replacement)))
+        }
+    }
+
+    pub fn replace_liked_track(&mut self, original: &ResourceKey, replacement: Item) -> Result<()> {
+        let member = self.replacement_member(original, replacement, false)?;
+        let tx = self
+            .db
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        ensure!(
+            remove_like(&tx, &original.source, &original.id)? == 1,
+            "原曲已不在本地喜欢的歌曲中"
+        );
+        member.save_like(&tx)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn replace_playlist_track(
+        &mut self,
+        id: &str,
+        original: &ResourceKey,
+        replacement: Item,
+        unavailable_only: bool,
+    ) -> Result<()> {
+        let new_member = self.replacement_member(original, replacement, unavailable_only)?;
         self.change_members(Some(id), "", |members| {
             let i = members
                 .iter()

@@ -14,6 +14,64 @@ fn track(source: &str, id: &str, unavailable: bool) -> Item {
 }
 
 #[test]
+fn local_favorites_filter_all_tracks_and_change_only_the_saved_favorite() -> Result<()> {
+    let tmp = tempfile::tempdir()?;
+    let mut db = Library::open(tmp.path())?;
+    let missing = track("local", "7", false);
+    let first = track("first", "7", false);
+    let replacement = track("second", "7", false);
+    let (playlist, _) = db.import_playlist(None, "原歌单", std::slice::from_ref(&first))?;
+    for id in 0..105 {
+        let song = track("first", &id.to_string(), false);
+        db.call(Request::new(
+            "like",
+            json!({"id":song.key.id, "on":true, "trackSource":"first", "track":song}),
+        ))?;
+    }
+    db.call(Request::new("like", json!({"id":missing.key.id,"on":true})))?;
+    let page: Page = serde_json::from_value(db.call(Request::new("liked", json!({})))?)?;
+    assert!(!page.more);
+    assert_eq!(page.items.len(), 106);
+    assert_eq!(page.items[0].key, missing.key);
+    assert!(page.items[0].unavailable);
+    assert_eq!(page.items.last().unwrap().key.id, "104");
+
+    // A failed write must leave the original available for another attempt.
+    db.db.execute_batch("CREATE TRIGGER fail_save BEFORE INSERT ON liked_plugin_tracks BEGIN SELECT RAISE(ABORT,'write failed'); END;")?;
+    assert!(
+        db.replace_liked_track(&first.key, replacement.clone())
+            .is_err()
+    );
+    db.db.execute_batch("DROP TRIGGER fail_save")?;
+    db.replace_liked_track(&first.key, replacement.clone())?;
+    db.replace_liked_track(&missing.key, replacement.clone())?;
+    assert!(db.replace_liked_track(&missing.key, first.clone()).is_err());
+    assert!(
+        db.replace_liked_track(&replacement.key, missing.clone())
+            .is_err()
+    );
+
+    drop(db);
+    let db = Library::open(tmp.path())?;
+    let favorites = db.liked_items()?;
+    assert_eq!(favorites.len(), 105);
+    assert_eq!(
+        favorites
+            .iter()
+            .filter(|item| item.key == replacement.key)
+            .count(),
+        1
+    );
+    assert!(
+        favorites
+            .iter()
+            .all(|item| item.key != first.key && item.key != missing.key)
+    );
+    assert_eq!(db.playlist_items(&playlist)?.1[0].key, first.key);
+    Ok(())
+}
+
+#[test]
 fn legacy_local_members_and_mixed_source_ids_survive_reopen_and_edits() -> Result<()> {
     let tmp = tempfile::tempdir()?;
     let mut db = Library::open(tmp.path())?;

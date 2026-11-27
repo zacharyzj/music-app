@@ -22,22 +22,27 @@ pub struct VideoQuality {
 pub struct Video {
     pub audio_url: Option<String>,
     pub title: String,
-    pub start: f64,
     pub speed: f64,
     pub preferred_height: u32,
     pub qualities: Vec<VideoQuality>,
 }
 
+impl VideoQuality {
+    pub fn preferred(qualities: &[Self], height: u32) -> Option<&Self> {
+        if height == 0 {
+            return None;
+        }
+        qualities
+            .iter()
+            .filter(|q| q.height <= height)
+            .max_by_key(|q| q.height)
+            .or_else(|| qualities.iter().min_by_key(|q| q.height))
+    }
+}
+
 impl Video {
     pub(super) fn initial_url<'a>(&'a self, default: &'a str) -> &'a str {
-        if self.preferred_height == 0 {
-            return default;
-        }
-        self.qualities
-            .iter()
-            .filter(|q| q.height <= self.preferred_height)
-            .max_by_key(|q| q.height)
-            .or_else(|| self.qualities.iter().min_by_key(|q| q.height))
+        VideoQuality::preferred(&self.qualities, self.preferred_height)
             .map_or(default, |q| q.url.as_str())
     }
 
@@ -104,7 +109,6 @@ mod tests {
         let mut video = Video {
             audio_url: None,
             title: String::new(),
-            start: 0.,
             speed: 1.,
             preferred_height: 0,
             qualities: vec![

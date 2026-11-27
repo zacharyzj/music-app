@@ -1,8 +1,10 @@
 mod audio;
+mod inline;
 mod output;
 mod video;
 use anyhow::{Result, anyhow};
 pub use audio::{Equalizer, Gains, Normalization, Outputs};
+pub use inline::{InlineVideo, VideoFrame, VideoFrames};
 use libloading::Library;
 use std::{
     ffi::{CStr, CString, c_char, c_int, c_void},
@@ -36,14 +38,32 @@ struct EndFile {
     reason: c_int,
     error: c_int,
 }
+#[derive(Clone, Copy, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct PlaybackStart {
+    pub position: f64,
+    pub paused: bool,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct PlaybackClock {
+    pub generation: u64,
+    pub start: PlaybackStart,
+    pub duration: f64,
+}
+
 #[derive(Debug)]
 pub enum Command {
     Open {
+        generation: u64,
+        start: PlaybackStart,
         url: String,
         referrer: Option<String>,
         video: Option<Video>,
         gains: Gains,
     },
+    ShowInline(InlineVideo),
+    HideInline,
+    InlineSpeed(f64),
     Normalize(Normalization),
     Output(String),
     Equalizer {
@@ -52,6 +72,7 @@ pub enum Command {
     },
     Pause(bool),
     Seek(f64),
+    ReadClock(Sender<Option<PlaybackClock>>),
     Volume(f64),
     Stop,
     Quit,
@@ -61,12 +82,18 @@ pub enum PlayerEvent {
     Ready,
     Outputs(Outputs),
     AudioError(String),
-    Position(f64, f64, bool),
+    Position(PlaybackClock),
     VideoControl(VideoControl),
-    Ended,
+    InlineError(u64, String),
+    Ended(u64),
     Error(String),
 }
-fn load_file(url: String, referrer: Option<String>, video: Option<Video>) -> Vec<String> {
+fn load_file(
+    url: String,
+    referrer: Option<String>,
+    video: Option<Video>,
+    position: f64,
+) -> Vec<String> {
     let mut args = vec!["loadfile".into(), url, "replace".into()];
     let mut options = Vec::new();
     // libmpv's per-file option list uses commas. Length quoting preserves signed URLs and titles.
@@ -81,9 +108,9 @@ fn load_file(url: String, referrer: Option<String>, video: Option<Video>) -> Vec
         if let Some(audio) = video.audio_url {
             options.push(quoted("audio-files-append", &audio));
         }
-        if video.start > 0.0 {
-            options.push(format!("start={}", video.start));
-        }
+    }
+    if position.is_finite() && position > 0.0 {
+        options.push(format!("start={position}"));
     }
     if !options.is_empty() {
         args.extend(["-1".into(), options.join(",")]);
@@ -103,24 +130,39 @@ unsafe fn dispatch(h: Handle, command: MpvCommand, args: &[impl AsRef<str>]) -> 
 pub struct Player {
     pub commands: Sender<Command>,
     pub events: Receiver<PlayerEvent>,
+    pub frames: VideoFrames,
 }
 impl Player {
+    pub fn clock(&self) -> Option<PlaybackClock> {
+        let (tx, rx) = mpsc::channel();
+        self.commands.send(Command::ReadClock(tx)).ok()?;
+        rx.recv_timeout(Duration::from_millis(500)).ok().flatten()
+    }
+
     pub fn start(path: Option<&Path>) -> Self {
         let (tx, rx) = mpsc::channel();
         let (etx, erx) = mpsc::channel();
         let path = path.map(Path::to_path_buf);
+        let frames = VideoFrames::default();
+        let render_frames = frames.clone();
         std::thread::spawn(move || {
-            if let Err(e) = unsafe { run(path.as_deref(), rx, etx.clone()) } {
+            if let Err(e) = unsafe { run(path.as_deref(), rx, etx.clone(), render_frames) } {
                 let _ = etx.send(PlayerEvent::Error(e.to_string()));
             }
         });
         Self {
             commands: tx,
             events: erx,
+            frames,
         }
     }
 }
-unsafe fn run(path: Option<&Path>, rx: Receiver<Command>, tx: Sender<PlayerEvent>) -> Result<()> {
+unsafe fn run(
+    path: Option<&Path>,
+    rx: Receiver<Command>,
+    tx: Sender<PlayerEvent>,
+    frames: VideoFrames,
+) -> Result<()> {
     unsafe {
         let default = if cfg!(windows) {
             "mpv-2.dll"
@@ -215,7 +257,45 @@ unsafe fn run(path: Option<&Path>, rx: Receiver<Command>, tx: Sender<PlayerEvent
         let mut eq = Equalizer::default();
         let mut eq_device = String::new();
         let mut loudness = audio::Loudness::default();
+        let mut generation = 0;
+        let mut pending_seek = None;
+        let read_clock = |generation, pending_seek: Option<f64>| {
+            let (mut position, mut duration) = (0.0f64, 0.0f64);
+            let mut paused: c_int = 0;
+            if prop(
+                h,
+                c"time-pos".as_ptr(),
+                5,
+                (&mut position as *mut f64).cast(),
+            ) < 0
+                || !position.is_finite()
+                || prop(h, c"pause".as_ptr(), 3, (&mut paused as *mut c_int).cast()) < 0
+            {
+                return None;
+            }
+            prop(
+                h,
+                c"duration".as_ptr(),
+                5,
+                (&mut duration as *mut f64).cast(),
+            );
+            Some(PlaybackClock {
+                generation,
+                start: PlaybackStart {
+                    position: pending_seek.unwrap_or(position).max(0.),
+                    paused: paused != 0,
+                },
+                duration,
+            })
+        };
         let mut pending_file = None;
+        let mut inline = inline::InlineOutput::new(&lib, h, api, frames);
+        let inline_failure = |inline: &mut inline::InlineOutput<'_>, error: anyhow::Error| {
+            if let Some(ticket) = inline.ticket() {
+                let _ = tx.send(PlayerEvent::InlineError(ticket, error.to_string()));
+            }
+            inline.close();
+        };
         let report_audio = |error: anyhow::Error| {
             let _ = tx.send(PlayerEvent::AudioError(error.to_string()));
         };
@@ -225,11 +305,16 @@ unsafe fn run(path: Option<&Path>, rx: Receiver<Command>, tx: Sender<PlayerEvent
                 Ok(c) => {
                     let args: Vec<String> = match c {
                         Command::Open {
+                            generation: next_generation,
+                            start,
                             url,
                             referrer,
                             video,
                             gains,
                         } => {
+                            inline.close();
+                            generation = next_generation;
+                            pending_seek = None;
                             pending_file = None;
                             loudness.stop();
                             active = false;
@@ -258,7 +343,23 @@ unsafe fn run(path: Option<&Path>, rx: Receiver<Command>, tx: Sender<PlayerEvent
                             {
                                 report_audio(e);
                             }
-                            pending_file = Some(load_file(url, referrer, video));
+                            api.command(
+                                h,
+                                &["set", "pause", if start.paused { "yes" } else { "no" }],
+                            )?;
+                            pending_file = Some(load_file(url, referrer, video, start.position));
+                            Vec::new()
+                        }
+                        Command::ShowInline(v) => {
+                            inline.request(v);
+                            Vec::new()
+                        }
+                        Command::HideInline => {
+                            inline.close();
+                            Vec::new()
+                        }
+                        Command::InlineSpeed(speed) => {
+                            inline.speed(speed);
                             Vec::new()
                         }
                         Command::Normalize(mode) => {
@@ -285,7 +386,16 @@ unsafe fn run(path: Option<&Path>, rx: Receiver<Command>, tx: Sender<PlayerEvent
                             "pause".into(),
                             if p { "yes" } else { "no" }.into(),
                         ],
+                        Command::ReadClock(reply) => {
+                            let _ = reply.send(if active {
+                                read_clock(generation, pending_seek)
+                            } else {
+                                None
+                            });
+                            Vec::new()
+                        }
                         Command::Seek(s) => {
+                            pending_seek = Some(s);
                             vec!["seek".into(), s.to_string(), "absolute+exact".into()]
                         }
                         Command::Volume(v) => vec![
@@ -294,6 +404,8 @@ unsafe fn run(path: Option<&Path>, rx: Receiver<Command>, tx: Sender<PlayerEvent
                             v.clamp(0.0, 100.0).to_string(),
                         ],
                         Command::Stop => {
+                            pending_seek = None;
+                            inline.close();
                             active = false;
                             pending_file = None;
                             loudness.stop();
@@ -345,8 +457,21 @@ unsafe fn run(path: Option<&Path>, rx: Receiver<Command>, tx: Sender<PlayerEvent
                 if e.event == 0 {
                     break;
                 }
+                if e.event == 5
+                    && let Err(err) = inline.complete(e.userdata, e.error)
+                {
+                    inline_failure(&mut inline, err);
+                }
                 if e.event == 8 {
                     active = true;
+                }
+                if e.event == 21 {
+                    // MPV_EVENT_PLAYBACK_RESTART completes a load or seek.
+                    pending_seek = None;
+                }
+                if e.event == 17 {
+                    // MPV_EVENT_VIDEO_RECONFIG
+                    inline.update_picture_size();
                 }
                 if e.event == 16
                     && !e.data.is_null()
@@ -358,28 +483,25 @@ unsafe fn run(path: Option<&Path>, rx: Receiver<Command>, tx: Sender<PlayerEvent
                     let end = &*(e.data as *const EndFile);
                     if active && end.reason == 0 {
                         active = false;
-                        let _ = tx.send(PlayerEvent::Ended);
+                        let _ = tx.send(PlayerEvent::Ended(generation));
                     } else if end.reason == 4 {
                         active = false;
                         let _ = tx.send(PlayerEvent::Error(format!("播放失败 ({})", end.error)));
                     }
                 }
             }
+            if active && let Err(err) = inline.start_if_needed() {
+                inline_failure(&mut inline, err);
+            }
             ticks += 1;
-            if ticks % 8 == 0 {
-                let (mut p, mut d) = (0.0f64, 0.0f64);
-                prop(h, c"time-pos".as_ptr(), 5, &mut p as *mut _ as *mut c_void);
-                prop(h, c"duration".as_ptr(), 5, &mut d as *mut _ as *mut c_void);
-                let mut paused: c_int = 0;
-                prop(
-                    h,
-                    c"pause".as_ptr(),
-                    3,
-                    &mut paused as *mut _ as *mut c_void,
-                );
-                let _ = tx.send(PlayerEvent::Position(p, d, paused != 0));
+            if active
+                && ticks % 8 == 0
+                && let Some(clock) = read_clock(generation, pending_seek)
+            {
+                let _ = tx.send(PlayerEvent::Position(clock));
             }
         }
+        inline.close();
         Ok(())
     }
 }

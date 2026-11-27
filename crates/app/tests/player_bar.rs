@@ -182,9 +182,18 @@ fn shortcuts_clicks_and_tooltips_in_the_player_window() -> anyhow::Result<()> {
         "the queue icon must close the same panel"
     );
     chord(window, Some(Key::Control), "l", true);
-    assert!(ui.get_show_lyrics());
+    assert!(ui.get_show_lyrics() && !ui.get_video_page());
     click(window, 590., 431.);
     assert!(!ui.get_show_lyrics());
+    ui.set_current_has_video(true);
+    click(window, 590., 431.);
+    assert!(ui.get_video_page());
+    ui.set_show_settings(true);
+    chord(window, Some(Key::Control), "l", true);
+    assert!(ui.get_video_page() && !ui.get_show_settings());
+    chord(window, Some(Key::Control), "l", true);
+    assert!(!ui.get_video_page() && !ui.get_show_lyrics());
+    ui.set_current_has_video(false);
 
     chord(window, Some(Key::Control), "m", true);
     assert_eq!(ui.get_volume_level(), 0.);

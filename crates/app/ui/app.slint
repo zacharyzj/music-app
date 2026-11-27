@@ -8,6 +8,7 @@ export struct Nav {title:string}
 export enum PlayerMode { sequential, repeat-all, repeat-one, shuffle, heartbeat }
 export enum FavoriteState { no-track, unsupported, checking, retry, unliked, liked, adding, removing }
 export enum ImportStep { closed, form, confirm, matching, details }
+export enum LocalPlaylistKind { none, custom, favorites }
 struct TrackDetails { title: string, artist: string, album: string, cover: image, duration: string, source: string, resource-id: string, availability: string, playable: bool }
 export struct ImportCandidate { resource: string, title: string, detail: string }
 struct VersionPreview { resource: string, loading: bool, error: string }
@@ -196,8 +197,9 @@ export component AppWindow inherits Window {
     callback select-output(int);
     callback select-eq(int);
     callback adjust-eq(int,float);
-    in-out property <string> search-text <=> query.text;
-    in-out property <int> search-kind <=> kind.current-index;
+    private property <bool> show-global-search: !root.local-playlist || root.show-settings || root.show-lyrics;
+    in-out property <string> search-text;
+    in-out property <int> search-kind;
     in-out property <int> nav-index:0;
     in property <[Nav]> nav;
     in property <[Nav]> page-links;
@@ -231,7 +233,8 @@ export component AppWindow inherits Window {
     callback online-source(int);
     in property <bool> cards;
     in property <bool> home-page;
-    in property <bool> local-playlist;
+    in property <LocalPlaylistKind> local-playlist-kind;
+    out property <bool> local-playlist: root.local-playlist-kind != LocalPlaylistKind.none;
     in-out property <string> playlist-query;
     in property <[string]> playlist-filter-sources;
     in-out property <int> playlist-filter-index;
@@ -323,6 +326,16 @@ export component AppWindow inherits Window {
     in-out property <bool> show-queue;
     in-out property <bool> show-settings;
     in-out property <bool> show-lyrics;
+    in property <bool> current-has-video;
+    out property <bool> video-page: root.show-lyrics && !root.show-settings && root.current-has-video;
+    in property <image> video-frame;
+    in property <string> video-error;
+    in property <bool> video-ended;
+    in property <[string]> video-qualities;
+    in-out property <int> video-quality-index;
+    in-out property <int> video-speed-index:2;
+    callback video-tick(int,int);
+    callback video-option(string,int);
     callback action(string);
     callback search(string,int);
     callback suggest(string);
@@ -426,14 +439,14 @@ export component AppWindow inherits Window {
                     }
                 }
                 VerticalLayout {padding:root.compact ? 16px : 24px;spacing:root.compact ? 10px : 12px;min-width:0px;min-height:0px;horizontal-stretch:1;
-                    HorizontalLayout {height:32px;spacing:12px;
+                    if root.show-global-search: HorizontalLayout {height:32px;spacing:12px;
                         if !root.compact: Text {min-width:0px;overflow:elide;text:root.source-index==0?"YOUR MUSIC LIBRARY":"MADE FOR YOUR MOMENTS";font-size:10px;color:Theme.muted;horizontal-stretch:1;vertical-alignment:center;}
                         if root.compact: Rectangle {horizontal-stretch:1;}
-                        query:=LineEdit {width:245px;placeholder-text:"搜索音乐、专辑、歌手";edited=>{root.suggest(self.text);}accepted=>{root.search(self.text,kind.current-index);}}
-                        kind:=ComboBox {width:92px;model:["歌曲","专辑","歌手","歌单"];}
-                        IconButton {icon:@image-url("icons/search.svg");clicked=>{root.search(query.text,kind.current-index);}}
+                        LineEdit {width:245px;placeholder-text:"搜索音乐、专辑、歌手";text<=>root.search-text;edited=>{root.suggest(self.text);}accepted=>{root.search(self.text,root.search-kind);}}
+                        ComboBox {width:92px;model:["歌曲","专辑","歌手","歌单"];current-index<=>root.search-kind;}
+                        IconButton {icon:@image-url("icons/search.svg");clicked=>{root.search(root.search-text,root.search-kind);}}
                     }
-                    if root.suggestions.length>0: HorizontalLayout {spacing:8px;for suggestion in root.suggestions: ActionButton {text:suggestion;clicked=>{query.text=suggestion;root.search(suggestion,kind.current-index);}}}
+                    if root.show-global-search && root.suggestions.length>0: HorizontalLayout {spacing:8px;for suggestion in root.suggestions: ActionButton {text:suggestion;clicked=>{root.search-text=suggestion;root.search(suggestion,root.search-kind);}}}
                     if root.show-update-notice && !root.show-settings: Rectangle {
                         height:58px;border-radius:12px;background:Theme.panel;border-width:1px;border-color:Theme.accent.with-alpha(0.45);
                         HorizontalLayout {padding-left:14px;padding-right:8px;padding-top:11px;padding-bottom:11px;spacing:8px;
@@ -446,15 +459,15 @@ export component AppWindow inherits Window {
                         }
                     }
                     HorizontalLayout {height:42px;spacing:10px;
-                        Text {text:root.show-settings?"偏好与扩展":root.show-lyrics?"正在聆听":root.heading;color:Theme.ink;font-size:root.compact ? 24px : 28px;font-weight:700;min-width:0px;overflow:elide;horizontal-stretch:1;vertical-alignment:center;}
-                        if root.album-detail&&!root.show-settings: ActionButton {text:"收藏专辑";clicked=>{root.action("save-album");}}
+                        Text {text:root.show-settings?"偏好与扩展":root.video-page?"正在看视频":root.show-lyrics?"正在聆听":root.heading;color:Theme.ink;font-size:root.compact ? 24px : 28px;font-weight:700;min-width:0px;overflow:elide;horizontal-stretch:1;vertical-alignment:center;}
+                        if root.album-detail&&!root.show-settings&&!root.show-lyrics: ActionButton {text:"收藏专辑";clicked=>{root.action("save-album");}}
                         if (root.source-index == 0 || root.remote-playlist) && !root.show-settings && !root.show-lyrics: ActionButton {
                             text:root.remote-playlist ? "导入到本地歌单" : "导入歌单"; clicked=>{root.import-action("open", 0);}
                         }
-                        if root.album-detail&&!root.show-settings: ActionButton {text:"取消收藏";clicked=>{root.action("unsave-album");}}
+                        if root.album-detail&&!root.show-settings&&!root.show-lyrics: ActionButton {text:"取消收藏";clicked=>{root.action("unsave-album");}}
                         if !root.cards&&root.rows.length>0&&!root.show-settings&&!root.show-lyrics: ActionButton {text:"播放全部";primary:true;clicked=>{root.action("play-all");}}
                     }
-                    if !root.home-page||root.busy||root.show-settings||root.has-error: Text {text:root.busy?"正在为你加载音乐…":root.has-error?root.status:root.show-settings?"选择你喜欢的方式，打造自己的音乐空间":root.status;color:root.has-error?#e6a3ae:Theme.muted;overflow:elide;min-width:0px;font-size:12px;height:18px;}
+                    if !root.video-page && (!root.home-page||root.busy||root.show-settings||root.has-error): Text {text:root.busy?"正在为你加载音乐…":root.has-error?root.status:root.show-settings?"选择你喜欢的方式，打造自己的音乐空间":root.status;color:root.has-error?#e6a3ae:Theme.muted;overflow:elide;min-width:0px;font-size:12px;height:18px;}
                     if root.show-settings: ScrollView {VerticalLayout {spacing:18px;
                         Rectangle {height:98px;border-radius:16px;background:Theme.panel;
                             VerticalLayout {padding-left:20px;padding-right:20px;alignment:center;spacing:8px;
@@ -563,7 +576,7 @@ export component AppWindow inherits Window {
                             VerticalLayout {x:0px;y:0px;width:parent.width;height:parent.height;alignment:center;padding:empty-panel.short-panel ? 10px : root.compact ? 16px : 50px;spacing:empty-panel.short-panel ? 6px : root.compact ? 12px : 18px;
                                 if !empty-panel.short-panel: HorizontalLayout {alignment:center;height:root.compact ? 48px : 64px;Image {source:@image-url("icons/disc.svg");colorize:Theme.accent;width:root.compact ? 48px : 64px;height:self.width;}}
                                 Text {text:root.local-playlist ? (root.playlist-query != "" || root.playlist-filter-index > 0 ? "没有符合条件的歌曲" : "歌单里还没有歌曲") : root.can-filter&&root.guest-only?"当前结果中没有免登录可下载的歌曲":root.search-page?"没有找到匹配结果":root.source-index==0?"把喜欢的音乐，留在身边。":"此刻，这里还很安静。";color:Theme.ink;font-size:root.compact ? 18px : 23px;font-weight:600;wrap:word-wrap;min-width:0px;horizontal-alignment:center;}
-                                Text {text:root.local-playlist ? (root.playlist-query != "" || root.playlist-filter-index > 0 ? "可调整搜索词或来源筛选。" : "可以导入歌单或从本地音乐添加歌曲。") : root.can-filter&&root.guest-only?"可关闭筛选查看其他录音。":root.search-page?"试试其他曲名或歌手名。":root.source-index==0?"添加音乐文件夹，让每一张唱片都有自己的位置。":"试试搜索喜欢的音乐，或切换到其他页面。";color:Theme.muted;font-size:12px;wrap:word-wrap;min-width:0px;horizontal-alignment:center;}
+                                Text {text:root.local-playlist ? (root.playlist-query != "" || root.playlist-filter-index > 0 ? "可调整搜索词或来源筛选。" : root.local-playlist-kind == LocalPlaylistKind.favorites ? "点击本地音乐或本地歌单中歌曲旁的爱心，即可在这里查看。" : "可以导入歌单或从本地音乐添加歌曲。") : root.can-filter&&root.guest-only?"可关闭筛选查看其他录音。":root.search-page?"试试其他曲名或歌手名。":root.source-index==0?"添加音乐文件夹，让每一张唱片都有自己的位置。":"试试搜索喜欢的音乐，或切换到其他页面。";color:Theme.muted;font-size:12px;wrap:word-wrap;min-width:0px;horizontal-alignment:center;}
                                 HorizontalLayout {alignment:center;if root.more: ActionButton {text:root.next-label;clicked=>{root.action("more");}}if root.source-index==0&&!root.search-page&&!root.local-playlist: ActionButton {text:"添加音乐目录";primary:true;clicked=>{root.action("add-folder");}}}
                             }
                         }
@@ -649,10 +662,10 @@ export component AppWindow inherits Window {
                                             }
                                             if row.account-actions || root.local-playlist: ListIconButton {
                                                 width:root.compact ? 28px : 36px;icon:@image-url("icons/close.svg");
-                                                enabled:root.local-playlist || row.kind == "album" || (row.liked && !row.like-pending);
-                                                description:row.kind == "album" ? "取消收藏专辑" : root.local-playlist ? "从当前歌单移除" : row.like-pending ? "正在更新喜欢状态"
+                                                enabled:root.local-playlist-kind == LocalPlaylistKind.custom || row.kind == "album" || (row.liked && !row.like-pending);
+                                                description:row.kind == "album" ? "取消收藏专辑" : root.local-playlist-kind == LocalPlaylistKind.custom ? "从当前歌单移除" : row.like-pending ? "正在更新喜欢状态"
                                                     : row.liked ? "从喜欢的歌曲移除" : "这首歌还没加入喜欢";
-                                                clicked=>{root.row-action(i,root.local-playlist ? "remove" : "unlike");}
+                                                clicked=>{root.row-action(i,root.local-playlist-kind == LocalPlaylistKind.custom ? "remove" : "unlike");}
                                             }
                                         }
                                     }
@@ -661,7 +674,24 @@ export component AppWindow inherits Window {
                             }}
                         }
                     }
-                    if root.show-lyrics&&!root.show-settings: HorizontalLayout {spacing:root.compact ? 20px : 38px;
+                    if root.video-page: VerticalLayout {min-height:0px;spacing:8px;
+                        video-surface:=Rectangle {background:#101014;clip:true;border-radius:10px;min-height:0px;vertical-stretch:1;
+                            Image {source:root.video-frame;image-fit:contain;width:parent.width;height:parent.height;}
+                            Timer {interval:16ms;running:root.video-page;triggered=>{root.video-tick(round(video-surface.width / 1px),round(video-surface.height / 1px));}}
+                            if root.video-error != "" || root.video-frame.width == 0: VerticalLayout {alignment:center;spacing:8px;
+                                Text {text:root.video-error != "" ? root.video-error : root.video-ended ? "播放已结束" : root.has-error ? root.status : "正在加载视频…";color:#e7e5ee;horizontal-alignment:center;wrap:word-wrap;}
+                                if root.video-error != "": HorizontalLayout {alignment:center;ActionButton {text:"重试";clicked=>{root.video-option("retry",0);}}}
+                            }
+                        }
+                        HorizontalLayout {height:34px;spacing:8px;
+                            Text {text:root.now-title;color:Theme.ink;horizontal-stretch:1;min-width:0px;overflow:elide;vertical-alignment:center;}
+                            Text {text:"倍速";color:Theme.muted;vertical-alignment:center;}
+                            ComboBox {width:98px;accessible-label:"视频倍速";model:["0.5×","0.75×","1×","1.25×","1.5×","1.75×","2×"];current-index<=>root.video-speed-index;selected(_) => {root.video-option("speed",self.current-index);}}
+                            Text {text:"画质";color:Theme.muted;vertical-alignment:center;}
+                            ComboBox {width:104px;accessible-label:"视频画质";model:root.video-qualities;current-index<=>root.video-quality-index;enabled:root.video-qualities.length > 1;selected(_) => {root.video-option("quality",self.current-index);}}
+                        }
+                    }
+                    if root.show-lyrics&&!root.show-settings&&!root.current-has-video: HorizontalLayout {spacing:root.compact ? 20px : 38px;
                         VerticalLayout {width:root.compact ? 140px : 240px;alignment:center;spacing:18px;Cover {source:root.now-cover;width:parent.width;height:self.width;border-radius:20px;}Text {text:root.now-title;color:Theme.ink;font-size:root.compact ? 16px : 20px;font-weight:600;wrap:word-wrap;}Text {text:root.now-artist;color:Theme.muted;wrap:word-wrap;}}
                         VerticalLayout {spacing:20px;Text {text:root.lyric==""?"让旋律先说话。":root.lyric;color:Theme.accent;font-size:26px;font-weight:600;wrap:word-wrap;min-height:80px;vertical-alignment:center;}Text {text:root.translated-lyric;color:Theme.muted;wrap:word-wrap;}ScrollView {VerticalLayout {Text {text:root.lyrics;color:Theme.muted;font-size:17px;wrap:word-wrap;vertical-alignment:top;}}}}
                     }
@@ -726,9 +756,9 @@ export component AppWindow inherits Window {
                     }
                     VerticalLayout {width:root.compact ? 172px : 220px;alignment:center;HorizontalLayout {height:36px;alignment:end;spacing:root.compact ? 4px : 8px;
                         lyrics-button := PlayerButton {
-                            icon: @image-url("icons/lyrics.svg"); active: root.show-lyrics;
-                            label: root.show-lyrics ? "关闭歌词" : "打开歌词"; shortcut: { modifier: ctrl, key: "l" };
-                            activated => { root.show-lyrics = !root.show-lyrics; root.show-settings = false; }
+                            icon: root.current-has-video ? @image-url("icons/video.svg") : @image-url("icons/lyrics.svg"); active: root.show-lyrics && !root.show-settings;
+                            label: root.current-has-video ? (root.video-page ? "关闭视频页" : "打开视频页") : self.active ? "关闭歌词" : "打开歌词"; shortcut: { modifier: ctrl, key: "l" };
+                            activated => { root.show-lyrics = !self.active; root.show-settings = false; }
                         }
                         mute := PlayerButton {
                             icon: root.volume-level > 0 ? @image-url("icons/volume.svg") : @image-url("icons/volume-muted.svg");

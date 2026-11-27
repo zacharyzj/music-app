@@ -115,7 +115,7 @@ mod tests {
     fn filters_the_whole_playlist_and_preserves_row_identity() -> Result<()> {
         let _clock = crate::test_ui::test_clock()?;
         let ui = AppWindow::new()?;
-        ui.set_local_playlist(true);
+        ui.set_local_playlist_kind(LocalPlaylistKind::Custom);
         let enabled = serde_json::from_value(
             json!({"id":"one","name":"第一来源","version":"1","abi":2,"capabilities":[],"network":[],"media":[]}),
         )?;

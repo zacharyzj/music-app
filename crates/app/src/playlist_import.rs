@@ -12,7 +12,7 @@ pub(super) struct Import {
     choices: Vec<Item>,
     choices_offset: u64,
     targets: Vec<Item>,
-    destination: String,
+    playlist_id: Option<String>,
     added: usize,
     replaced: usize,
     missing: VecDeque<Item>,
@@ -212,13 +212,13 @@ impl UiState {
         ui.set_import_step(ImportStep::Closed);
         let completed = std::mem::take(&mut self.import);
         self.import.ticket = completed.ticket.wrapping_add(1);
-        if !details && !completed.destination.is_empty() {
+        if !details && let Some(id) = completed.playlist_id {
             self.open_source(
                 ui,
                 jobs,
                 generation,
                 "local",
-                Some(navigation::Location::local_playlist(completed.destination)),
+                Some(navigation::Location::local_playlist(id)),
             );
             send(jobs, generation, "local", "local-playlists", json!({}));
             ui.invoke_notify_row(
@@ -237,12 +237,19 @@ impl UiState {
         jobs: &mpsc::Sender<Job>,
         item: Item,
     ) {
-        let Some(id) = self.last.args["id"].as_str() else {
-            return;
+        let playlist_id = match ui.get_local_playlist_kind() {
+            LocalPlaylistKind::Favorites => None,
+            LocalPlaylistKind::Custom => {
+                let Some(id) = self.last.args["id"].as_str() else {
+                    return;
+                };
+                Some(id.to_owned())
+            }
+            LocalPlaylistKind::None => return,
         };
         self.import = Import {
             ticket: self.import.ticket.wrapping_add(1),
-            destination: id.to_owned(),
+            playlist_id,
             missing: VecDeque::from([item]),
             ..Default::default()
         };
@@ -504,7 +511,7 @@ impl UiState {
                 );
             }
             "import-playlist" => {
-                self.import.destination = value["id"].as_str().unwrap_or_default().into();
+                self.import.playlist_id = value["id"].as_str().map(str::to_owned);
                 self.import.added = value["added"].as_u64().unwrap_or_default() as usize;
                 self.import.missing =
                     serde_json::from_value(value["missing"].clone()).unwrap_or_default();
@@ -515,21 +522,34 @@ impl UiState {
                     ui.set_import_step(ImportStep::Confirm);
                 }
             }
-            "import-change-source" => {
-                if let Ok(track) = serde_json::from_value::<Item>(reply.args["track"].clone()) {
+            "import-change-source" | "import-change-liked-source" => {
+                let favorites = reply.op == "import-change-liked-source";
+                if let Ok(mut track) = serde_json::from_value::<Item>(reply.args["track"].clone()) {
+                    track.use_local_favorites = track.key.source != "local";
+                    if favorites && let Some(original) = self.import.missing.front() {
+                        self.likes
+                            .insert(favorites::FavoriteKey::of(original), false);
+                        self.likes.insert(favorites::FavoriteKey::of(&track), true);
+                        self.refresh_hearts(ui);
+                    }
                     self.import.missing = VecDeque::from([track]);
                     self.show_track_details(ui, jobs);
                 }
-                if ui.get_local_playlist() && self.last.args["id"] == self.import.destination {
-                    send(
-                        jobs,
-                        generation,
-                        "local",
-                        "playlist",
-                        json!({"id":self.import.destination}),
-                    );
+                let page = if favorites { "liked" } else { "playlist" };
+                if self.page_source == "local"
+                    && self.last.op == page
+                    && self.last.args["id"] == reply.args["id"]
+                {
+                    send(jobs, generation, "local", page, self.last.args.clone());
                 }
-                ui.invoke_notify_row("已更新这张本地歌单的歌曲来源".into());
+                ui.invoke_notify_row(
+                    if favorites {
+                        "已更新本地喜欢的歌曲来源"
+                    } else {
+                        "已更新这张本地歌单的歌曲来源"
+                    }
+                    .into(),
+                );
             }
             "import-replace" => {
                 self.import.replaced += 1;
@@ -650,12 +670,12 @@ pub(super) fn install(
                     &jobs,
                     s.import.ticket,
                     "local",
-                    if step == ImportStep::Details {
-                        "import-change-source"
-                    } else {
-                        "import-replace"
+                    match (step, &s.import.playlist_id) {
+                        (ImportStep::Details, None) => "import-change-liked-source",
+                        (ImportStep::Details, Some(_)) => "import-change-source",
+                        _ => "import-replace",
                     },
-                    json!({"id":s.import.destination,"original":original.key,"track":track}),
+                    json!({"id":s.import.playlist_id,"original":original.key,"track":track}),
                 );
             }
             _ => {}
