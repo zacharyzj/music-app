@@ -2,19 +2,24 @@ use super::*;
 use music_player::{Equalizer, Normalization, Outputs};
 
 impl UiState {
+    pub(super) fn advance_available(&mut self, natural: bool) -> Option<Item> {
+        self.queue
+            .advance_available(natural, rand::random(), |t| playable(t, &self.plugins))
+    }
     pub(super) fn replace_queue_from_page(&mut self) {
         self.queue.items = self
             .items
             .iter()
-            .filter(|i| i.kind == "track" && !i.unavailable)
+            .filter(|i| i.kind == "track" && playable(i, &self.plugins))
             .cloned()
             .collect();
-        self.queue.album_origin = (self.last.op == "album" && self.online.is_none())
-            .then(|| ResourceKey {
-                source: self.page_source.clone(),
-                id: self.last.args["id"].as_str().unwrap_or_default().into(),
-            })
-            .filter(|k| !k.id.is_empty());
+        self.queue.album_origin =
+            (self.last.op == "album" && self.online.is_none() && !self.queue.items.is_empty())
+                .then(|| ResourceKey {
+                    source: self.page_source.clone(),
+                    id: self.last.args["id"].as_str().unwrap_or_default().into(),
+                })
+                .filter(|k| !k.id.is_empty());
     }
 
     pub(super) fn normalization(&self) -> Normalization {
@@ -228,6 +233,10 @@ mod tests {
         let mut s = UiState::new(Queue::default(), Default::default(), vec![]);
         s.normalize = true;
         s.items = vec![Item {
+            key: ResourceKey {
+                source: "local".into(),
+                id: "album-track".into(),
+            },
             kind: "track".into(),
             ..Default::default()
         }];

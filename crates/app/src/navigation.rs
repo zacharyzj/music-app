@@ -38,6 +38,16 @@ fn page_request(op: &str, args: &Value) -> Option<Request> {
 }
 
 impl Location {
+    pub(super) fn local_playlist(id: String) -> Self {
+        Self {
+            source: "local".into(),
+            page_source: "local".into(),
+            page: Request::new("playlist", json!({"id":id})),
+            sidebar: Some(Request::new("playlists", json!({}))),
+            tabs: Vec::new(),
+            heartbeat: None,
+        }
+    }
     pub fn read(db: &Library) -> Option<Self> {
         let mut location: Self = serde_json::from_value(db.get(KEY)).ok()?;
         location.page = page_request(&location.page.op, &location.page.args)?;

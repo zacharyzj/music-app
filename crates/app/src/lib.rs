@@ -3,6 +3,7 @@ mod download;
 mod favorites;
 mod heartbeat;
 mod navigation;
+mod playlist_import;
 mod preferences;
 mod search;
 mod sound;
@@ -85,6 +86,7 @@ struct UiState {
     resume_heartbeat: Option<String>,
     last: Request,
     playlists: Vec<Item>,
+    import: playlist_import::Import,
     lines: Vec<(u64, String)>,
     translations: Vec<(u64, String)>,
     login_key: String,
@@ -128,6 +130,7 @@ impl UiState {
             resume_heartbeat: None,
             last: Request::new("library", json!({})),
             playlists: vec![],
+            import: Default::default(),
             lines: vec![],
             translations: vec![],
             login_key: String::new(),
@@ -165,6 +168,7 @@ impl UiState {
         ui.set_home_page(false);
         ui.set_album_detail(false);
         ui.set_local_playlist(false);
+        ui.set_remote_playlist(false);
         ui.set_has_error(false);
     }
 
@@ -191,7 +195,29 @@ impl UiState {
                 result.liked = item.kind == "track" && self.is_liked(&item.key);
                 result.like_pending =
                     item.kind == "track" && self.pending_likes.contains(&item.key);
-                if self.online.is_some()
+                if self.last.op == "playlist"
+                    && self.page_source == "local"
+                    && item.key.source != "local"
+                {
+                    let label = self
+                        .plugins
+                        .iter()
+                        .find(|(m, _)| m.id == item.key.source)
+                        .map_or(item.key.source.as_str(), |(m, _)| m.name.as_str());
+                    let status = if plugin.is_none() {
+                        " · 来源未启用"
+                    } else if item.unavailable {
+                        " · 原曲不可用"
+                    } else {
+                        ""
+                    };
+                    result.subtitle = [format!("{label}{status}"), result.subtitle.to_string()]
+                        .into_iter()
+                        .filter(|s| !s.is_empty())
+                        .collect::<Vec<_>>()
+                        .join(" · ")
+                        .into();
+                } else if self.online.is_some()
                     && let Some(m) = plugin
                 {
                     let mut details = vec![m.name.as_str()];
@@ -231,6 +257,9 @@ impl UiState {
             })
             .collect();
         ui.set_page_has_video(list.iter().any(|r| r.show_video));
+        if ui.get_local_playlist() {
+            ui.set_can_download(list.iter().any(|r| r.show_download));
+        }
         let model = ui.get_rows();
         if model.row_count() == list.len()
             && model
@@ -263,7 +292,10 @@ impl UiState {
 
     fn finish_playlist_edit(&mut self, ui: &AppWindow, reply: Reply) {
         let key = ResourceKey {
-            source: reply.source,
+            source: reply.args["source"]
+                .as_str()
+                .unwrap_or(&reply.source)
+                .to_owned(),
             id: reply.args["track"].as_str().unwrap_or_default().to_owned(),
         };
         let title = self
@@ -282,7 +314,10 @@ impl UiState {
                     .map(|p| format!("歌单「{}」", p.title))
                     .unwrap_or_else(|| "歌单".into());
                 if reply.op == "removeFromPlaylist" {
-                    if self.last.op == "playlist" && self.last.args["id"] == reply.args["id"] {
+                    if self.page_source == "local"
+                        && self.last.op == "playlist"
+                        && self.last.args["id"] == reply.args["id"]
+                    {
                         self.remove_visible_track(ui, &key);
                     }
                     format!("{title}已从{name}移除")
@@ -362,6 +397,10 @@ fn image_path(path: &str) -> slint::Image {
         slint::Image::default()
     }
 }
+fn playable(t: &Item, plugins: &[(Manifest, bool)]) -> bool {
+    !t.unavailable
+        && (t.key.source == "local" || plugins.iter().any(|(m, on)| *on && m.id == t.key.source))
+}
 fn row(t: &Item, plugins: &[(Manifest, bool)]) -> Row {
     Row {
         title: t.title.clone().into(),
@@ -378,7 +417,11 @@ fn row(t: &Item, plugins: &[(Manifest, bool)]) -> Row {
         } else {
             slint::Image::default()
         },
-        disabled: t.unavailable,
+        disabled: if t.kind == "track" {
+            !playable(t, plugins)
+        } else {
+            t.unavailable
+        },
         recommended: t.heartbeat_recommendation,
         show_video: t.kind == "track" && has_capability(plugins, &t.key.source, "video"),
         show_download: false,
@@ -414,16 +457,21 @@ fn prepare_items(
     covers: &mpsc::SyncSender<covers::Cover>,
     generation: u64,
 ) {
-    let domains = plugins
-        .iter()
-        .find(|(m, _)| m.id == source)
-        .map(|(m, _)| m.media.as_slice())
-        .unwrap_or_default();
     for item in items {
-        item.key.source = source.to_owned();
-        if source == "local" {
+        if source != "local" || item.key.source.is_empty() {
+            item.key.source = source.to_owned();
+        }
+        if item.key.source == "local" {
             continue;
         }
+        let Some((manifest, _)) = plugins
+            .iter()
+            .find(|(m, on)| *on && m.id == item.key.source)
+        else {
+            item.cover.clear();
+            continue;
+        };
+        let domains = &manifest.media;
         if !music_plugin_host::media_allowed(&item.cover, domains) {
             item.cover.clear();
         } else {
@@ -546,6 +594,9 @@ fn play(
     item: Item,
     video: bool,
 ) {
+    if !playable(&item, &state.plugins) {
+        return;
+    }
     state.play_generation += 1;
     state.heartbeat_track(&item);
     let mut args = json!({"id":item.key.id});
@@ -658,6 +709,7 @@ pub fn run_at(root: PathBuf) -> Result<()> {
         download_tx,
     }
     .start(rx, cancel.clone());
+    playlist_import::install(&ui, state.clone(), tx.clone(), generation.clone());
     let player = Rc::new(Player::start(
         std::env::var_os("MUSIC_API_MPV").as_deref().map(Path::new),
     ));
@@ -774,7 +826,7 @@ pub fn run_at(root: PathBuf) -> Result<()> {
                 }
                 "open" | "video" if item.kind == "track" => {
                     let video = action == "video";
-                    if item.unavailable
+                    if !playable(&item, &s.plugins)
                         || (video && !has_capability(&s.plugins, &item.key.source, "video"))
                     {
                         return;
@@ -803,7 +855,7 @@ pub fn run_at(root: PathBuf) -> Result<()> {
                         s.last.args.clone(),
                     );
                 }
-                "add" if item.kind == "track" && !item.unavailable => {
+                "add" if item.kind == "track" && playable(&item, &s.plugins) => {
                     if item.key.source == "local"
                         && let Some(p) = ui
                             .get_playlist_index()
@@ -833,7 +885,7 @@ pub fn run_at(root: PathBuf) -> Result<()> {
                         &genr,
                         "local",
                         "removeFromPlaylist",
-                        json!({"id":s.last.args["id"],"track":item.key.id}),
+                        json!({"id":s.last.args["id"],"track":item.key.id,"source":item.key.source}),
                     );
                 }
                 "like" | "unlike" if item.kind == "album" => {
@@ -880,7 +932,7 @@ pub fn run_at(root: PathBuf) -> Result<()> {
                 refresh_queue(&ui, &s);
             } else if matches!(a.as_str(), "play" | "video")
                 && let Some(t) = s.queue.items.get(i as usize).cloned()
-                && !t.unavailable
+                && playable(&t, &s.plugins)
                 && (a != "video" || has_capability(&s.plugins, &t.key.source, "video"))
             {
                 s.queue.index = Some(i as usize);
@@ -930,7 +982,8 @@ pub fn run_at(root: PathBuf) -> Result<()> {
                         .queue
                         .index
                         .and_then(|i| s.queue.items.get(i).cloned())
-                        .or_else(|| s.queue.advance(false, rand::random()))
+                        .filter(|t| playable(t, &s.plugins))
+                        .or_else(|| s.advance_available(false))
                     {
                         play(&ui, &mut s, &job, &pc, t, false);
                     }
@@ -942,9 +995,17 @@ pub fn run_at(root: PathBuf) -> Result<()> {
             }
             "next" | "previous" => {
                 let item = if a == "previous" {
-                    let i = s.queue.index.unwrap_or(0).saturating_sub(1);
-                    s.queue.index = Some(i);
-                    s.queue.items.get(i).cloned()
+                    let before = s.queue.index.unwrap_or(0).saturating_sub(1);
+                    let index = s
+                        .queue
+                        .items
+                        .iter()
+                        .take(before.saturating_add(1))
+                        .rposition(|t| playable(t, &s.plugins));
+                    if let Some(i) = index {
+                        s.queue.index = Some(i);
+                    }
+                    index.and_then(|i| s.queue.items.get(i).cloned())
                 } else {
                     s.advance_track(false, &job)
                 };
@@ -971,7 +1032,7 @@ pub fn run_at(root: PathBuf) -> Result<()> {
                 s.stop_heartbeat(&ui);
                 s.replace_queue_from_page();
                 s.queue.index = None;
-                if let Some(t) = s.queue.advance(false, rand::random()) {
+                if let Some(t) = s.advance_available(false) {
                     refresh_queue(&ui, &s);
                     play(&ui, &mut s, &job, &pc, t, false);
                 }
@@ -1337,6 +1398,10 @@ pub fn run_at(root: PathBuf) -> Result<()> {
                 }
             }
             while let Ok(reply) = out_rx.try_recv() {
+                if reply.op.starts_with("import-") {
+                    s.finish_import_reply(&ui, &job, &genr, reply);
+                    continue;
+                }
                 if reply.op == "heartbeat" {
                     s.finish_heartbeat(
                         &ui,
@@ -1662,9 +1727,19 @@ pub fn run_at(root: PathBuf) -> Result<()> {
                                 ui.set_heartbeat_playlist_id("".into());
                             }
                             update_plugins(&ui, &mut s);
+                            s.refresh_import_sources(&ui);
                             s.request_current_like(&ui, &job);
                             refresh_queue(&ui, &s);
                             s.update_rows(&ui);
+                            if s.page_source == "local" && s.last.op == "playlist" {
+                                send(
+                                    &job,
+                                    &genr,
+                                    "local",
+                                    "playlist",
+                                    json!({"id":s.last.args["id"]}),
+                                );
+                            }
                             if s.online.is_some() && s.last.op == "search" && s.source == old_source
                             {
                                 genr.fetch_add(1, Ordering::Relaxed);
@@ -1767,6 +1842,9 @@ pub fn run_at(root: PathBuf) -> Result<()> {
                                 ui.set_local_playlist(
                                     reply.op == "playlist" && reply.source == "local",
                                 );
+                                ui.set_remote_playlist(
+                                    reply.op == "playlist" && reply.source != "local",
+                                );
                                 ui.set_cards(
                                     !page.items.is_empty()
                                         && page.items.iter().all(|i| i.kind != "track"),
@@ -1787,6 +1865,15 @@ pub fn run_at(root: PathBuf) -> Result<()> {
                                             .map(|t| (t.key.clone(), true)),
                                     );
                                     ui.set_current_favorite(s.current_favorite());
+                                } else if ui.get_local_playlist() {
+                                    for source in page
+                                        .items
+                                        .iter()
+                                        .map(|t| t.key.source.as_str())
+                                        .collect::<HashSet<_>>()
+                                    {
+                                        s.request_likes(&job, &genr, source, &page.items);
+                                    }
                                 } else {
                                     s.request_likes(&job, &genr, &reply.source, &page.items);
                                 }

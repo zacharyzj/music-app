@@ -148,7 +148,7 @@ impl UiState {
         natural: bool,
         jobs: &mpsc::Sender<Job>,
     ) -> Option<Item> {
-        let next = self.queue.advance(natural, rand::random());
+        let next = self.advance_available(natural);
         if next.is_none()
             && let Some(mix) = self.heartbeat.as_mut()
         {

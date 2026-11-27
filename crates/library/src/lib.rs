@@ -1,3 +1,4 @@
+mod playlists;
 use anyhow::Result;
 use lofty::{
     file::{AudioFile, TaggedFileExt},
@@ -267,11 +268,10 @@ impl Library {
             |r| r.get::<_, String>(0),
         )?))
     }
-    fn playlist_page(&self, query: &str, offset: u64) -> Result<Value> {
-        let query = query.to_lowercase();
-        let items = self
+    pub fn playlist_choices(&self) -> Result<Vec<Item>> {
+        Ok(self
             .db
-            .prepare("SELECT id,name FROM playlists ORDER BY name")?
+            .prepare("SELECT id,name FROM playlists ORDER BY name,id")?
             .query_map([], |r| {
                 Ok(Item {
                     key: ResourceKey {
@@ -283,8 +283,12 @@ impl Library {
                     ..Default::default()
                 })
             })?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-        let filtered: Vec<_> = items
+            .collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+    fn playlist_page(&self, query: &str, offset: u64) -> Result<Value> {
+        let query = query.to_lowercase();
+        let filtered: Vec<_> = self
+            .playlist_choices()?
             .into_iter()
             .filter(|v| v.title.to_lowercase().contains(&query))
             .collect();
@@ -342,29 +346,16 @@ impl Library {
                 Ok(json!(id))
             }
             "addToPlaylist" | "removeFromPlaylist" => {
-                let s: String =
-                    self.db
-                        .query_row("SELECT tracks FROM playlists WHERE id=?1", [id], |r| {
-                            r.get(0)
-                        })?;
-                let mut ids: Vec<String> = serde_json::from_str(&s)?;
-                let old_len = ids.len();
                 let track = a["track"].as_str().unwrap_or("").to_owned();
-                if r.op == "addToPlaylist" {
-                    if !ids.contains(&track) {
-                        ids.push(track);
-                    }
-                } else {
-                    ids.retain(|x| x != &track);
-                }
-                let changed = ids.len() != old_len;
-                if changed {
-                    self.db.execute(
-                        "UPDATE playlists SET tracks=?1 WHERE id=?2",
-                        params![serde_json::to_string(&ids)?, id],
-                    )?;
-                }
-                Ok(json!(changed))
+                let key = ResourceKey {
+                    source: a["source"].as_str().unwrap_or("local").into(),
+                    id: track,
+                };
+                Ok(json!(self.edit_playlist(
+                    id,
+                    key,
+                    r.op == "addToPlaylist"
+                )?))
             }
             "deletePlaylist" => {
                 self.db.execute("DELETE FROM playlists WHERE id=?1", [id])?;
@@ -383,8 +374,11 @@ impl Library {
                 a["offset"].as_u64().unwrap_or(0),
             ),
             _ => {
-                let mut tracks = self.tracks()?;
-                let mut title = "本地音乐".to_string();
+                let (mut title, mut tracks) = if r.op == "playlist" {
+                    self.playlist_items(id)?
+                } else {
+                    ("本地音乐".to_string(), self.tracks()?)
+                };
                 match r.op.as_str() {
                     "liked" => {
                         let ids: HashSet<String> = self
@@ -395,18 +389,6 @@ impl Library {
                         tracks.retain(|v| ids.contains(&v.key.id));
                         title = "喜欢的歌曲".into();
                     }
-                    "playlist" => {
-                        let (name, s): (String, String) = self.db.query_row(
-                            "SELECT name, tracks FROM playlists WHERE id=?1",
-                            [id],
-                            |r| Ok((r.get(0)?, r.get(1)?)),
-                        )?;
-                        title = name;
-                        let ids: Vec<String> = serde_json::from_str(&s)?;
-                        let all: HashMap<_, _> =
-                            tracks.into_iter().map(|v| (v.key.id.clone(), v)).collect();
-                        tracks = ids.iter().filter_map(|id| all.get(id).cloned()).collect();
-                    }
                     "album" => {
                         tracks.retain(|v| format!("{}\u{1f}{}", v.artist, v.album) == id);
                         title = tracks.first().map(|v| v.album.clone()).unwrap_or_default();
@@ -415,7 +397,7 @@ impl Library {
                         tracks.retain(|v| v.artist == id);
                         title = id.into();
                     }
-                    "home" | "search" | "library" => {}
+                    "home" | "search" | "library" | "playlist" => {}
                     _ => anyhow::bail!("不支持此本地操作"),
                 }
                 let query = a["query"].as_str().unwrap_or("").to_lowercase();
@@ -457,7 +439,11 @@ impl Library {
                 }
                 let offset = a["offset"].as_u64().unwrap_or(0);
                 // The album's playback queue is built from this page, including long box sets.
-                let limit = if r.op == "album" { tracks.len() } else { 100 };
+                let limit = if matches!(r.op.as_str(), "album" | "playlist") {
+                    tracks.len()
+                } else {
+                    100
+                };
                 let more = tracks.len().saturating_sub(offset as usize) > limit;
                 Ok(json!(Page {
                     title,

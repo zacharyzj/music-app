@@ -114,6 +114,24 @@ impl Workers {
             retire(plugins, args["id"].as_str().unwrap_or(""));
         }
         let mut db = self.library.lock().map_err(|_| anyhow!("音乐库不可用"))?;
+        if op == "import-targets" {
+            return Ok(json!(db.playlist_choices()?));
+        }
+        if op == "import-replace" {
+            let item: Item = serde_json::from_value(args["track"].clone())?;
+            ensure!(
+                plugin_list(&root.join("plugins"), &db)
+                    .iter()
+                    .any(|(m, on)| *on && m.id == item.key.source),
+                "替选歌曲的来源未安装或未启用"
+            );
+            db.replace_unavailable(
+                args["id"].as_str().unwrap_or_default(),
+                &serde_json::from_value(args["original"].clone())?,
+                item,
+            )?;
+            return Ok(Value::Null);
+        }
         if op == "persist-downloads" {
             db.set("download-queue", args.clone())?;
             return Ok(Value::Null);
@@ -194,6 +212,11 @@ impl Workers {
     fn plugin(&self, rt: &Runtime, source: &str, request: &Request) -> Result<Value> {
         let op = request.op.as_str();
         let args = &request.args;
+        let op = match op {
+            "import-search" => "search",
+            "import-choices" => "playlists",
+            op => op,
+        };
         ensure!(
             matches!(
                 op,
@@ -204,6 +227,7 @@ impl Workers {
                     | "album"
                     | "artist"
                     | "playlist"
+                    | "import-playlist"
                     | "playlists"
                     | "liked"
                     | "heartbeat"
@@ -266,6 +290,35 @@ impl Workers {
         drop(db);
         let bytes = std::fs::read(package)?;
         let data = self.root.join("plugin-data");
+        if op == "import-playlist" {
+            let m = manifest(&bytes)?;
+            ensure!(
+                m.id == source && !m.capabilities.iter().any(|c| c == "tracksOnly"),
+                "该插件不支持导入歌单"
+            );
+            let page = super::playlist_import::read_playlist(source, |offset| {
+                Ok(serde_json::from_value(rt.call(
+                    &bytes,
+                    &data,
+                    Request::new("playlist", json!({"id":args["id"],"offset":offset})),
+                )?)?)
+            })?;
+            let name = args["name"]
+                .as_str()
+                .map(str::trim)
+                .filter(|n| !n.is_empty())
+                .unwrap_or(&page.title);
+            let mut db = self.library.lock().map_err(|_| anyhow!("音乐库不可用"))?;
+            ensure!(
+                plugin_list(&self.root.join("plugins"), &db)
+                    .iter()
+                    .any(|(m, on)| *on && m.id == source),
+                "来源插件已移除或停用"
+            );
+            let (id, added) = db.import_playlist(args["target"].as_str(), name, &page.items)?;
+            let missing: Vec<_> = page.items.into_iter().filter(|t| t.unavailable).collect();
+            return Ok(json!({"id":id,"added":added,"missing":missing}));
+        }
         if op == "heartbeat" {
             ensure!(
                 source == "netease"
@@ -315,7 +368,7 @@ impl Workers {
             }
             return Ok(value);
         }
-        rt.call(&bytes, &data, request.clone())
+        rt.call(&bytes, &data, Request::new(op, args.clone()))
     }
 }
 

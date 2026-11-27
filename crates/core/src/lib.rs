@@ -162,22 +162,50 @@ impl Queue {
     }
 
     pub fn advance(&mut self, natural: bool, random: u64) -> Option<Item> {
-        let count = self.items.len();
-        if count == 0 {
+        self.advance_available(natural, random, |_| true)
+    }
+
+    pub fn advance_available(
+        &mut self,
+        natural: bool,
+        random: u64,
+        playable: impl Fn(&Item) -> bool,
+    ) -> Option<Item> {
+        if self.items.is_empty() {
             self.index = None;
             return None;
         }
         let mode = self.playback_mode();
-        let next = match self.index.filter(|&i| i < count) {
-            None if mode == PlaybackMode::Shuffle => random as usize % count,
-            None => 0,
-            Some(i) if natural && mode == PlaybackMode::RepeatOne => i,
-            Some(i) if mode == PlaybackMode::Shuffle && count > 1 => {
-                (i + 1 + random as usize % (count - 1)) % count
+        let cursor = self.index.filter(|&i| i < self.items.len());
+        let first_from = |start: usize| {
+            self.items[start..]
+                .iter()
+                .position(&playable)
+                .map(|i| start + i)
+        };
+        let next = match (mode, cursor) {
+            (PlaybackMode::Shuffle, _) => {
+                let indices: Vec<_> = self
+                    .items
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, t)| playable(t))
+                    .map(|(i, _)| i)
+                    .collect();
+                let count = indices.len();
+                if count == 0 {
+                    return None;
+                }
+                let pos = cursor.and_then(|i| indices.binary_search(&i).ok());
+                indices[match pos {
+                    Some(p) if count > 1 => (p + 1 + random as usize % (count - 1)) % count,
+                    _ => random as usize % count,
+                }]
             }
-            Some(i) if i + 1 < count => i + 1,
-            Some(_) if matches!(mode, PlaybackMode::RepeatAll | PlaybackMode::Shuffle) => 0,
-            _ => return None,
+            (_, None) => first_from(0)?,
+            (PlaybackMode::RepeatOne, Some(i)) if natural && playable(&self.items[i]) => i,
+            (PlaybackMode::RepeatAll, Some(i)) => first_from(i + 1).or_else(|| first_from(0))?,
+            (_, Some(i)) => first_from(i + 1)?,
         };
         self.index = Some(next);
         self.items.get(next).cloned()
@@ -280,6 +308,36 @@ mod tests {
         q.cycle_playback_mode();
         assert_eq!(q.playback_mode(), Sequential);
         assert!(q.advance(true, 0).is_none());
+    }
+
+    #[test]
+    fn disabled_entries_are_skipped_in_every_mode() {
+        let mut queue = Queue {
+            items: (0..4)
+                .map(|i| Item {
+                    unavailable: i % 2 == 0,
+                    ..Default::default()
+                })
+                .collect(),
+            ..Default::default()
+        };
+        let advance = |q: &mut Queue, natural| {
+            q.advance_available(natural, 0, |i| !i.unavailable)
+                .map(|_| q.index.unwrap())
+        };
+        assert_eq!(advance(&mut queue, false), Some(1));
+        assert_eq!(advance(&mut queue, true), Some(3));
+        assert_eq!(advance(&mut queue, true), None);
+        queue.cycle_playback_mode();
+        assert_eq!(advance(&mut queue, true), Some(1));
+        queue.cycle_playback_mode();
+        assert_eq!(advance(&mut queue, true), Some(1));
+        queue.items[1].unavailable = true;
+        assert_eq!(advance(&mut queue, true), Some(3));
+        queue.cycle_playback_mode();
+        assert_eq!(advance(&mut queue, false), Some(3));
+        queue.items[3].unavailable = true;
+        assert_eq!(advance(&mut queue, false), None);
     }
 
     #[test]

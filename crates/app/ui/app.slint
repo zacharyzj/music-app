@@ -6,6 +6,8 @@ export struct DownloadRow { title:string, artist:string, status:string, fraction
 export struct Nav {title:string}
 export enum PlayerMode { sequential, repeat-all, repeat-one, shuffle, heartbeat }
 export enum FavoriteState { no-track, unsupported, checking, retry, unliked, liked, adding, removing }
+export enum ImportStep { closed, form, confirm, matching }
+export struct ImportCandidate { title: string, detail: string }
 struct ModeAppearance { name: string, icon: image }
 export global Theme {
     in-out property <bool> dark:true;
@@ -225,6 +227,23 @@ export component AppWindow inherits Window {
     in property <bool> cards;
     in property <bool> home-page;
     in property <bool> local-playlist;
+    in property <bool> remote-playlist;
+    in property <ImportStep> import-step: closed;
+    in property <bool> import-busy;
+    in property <[string]> import-sources;
+    in property <[string]> import-choices;
+    in property <bool> import-can-browse;
+    in-out property <int> import-source-index;
+    in property <[string]> import-targets;
+    in-out property <int> import-target-index;
+    in-out property <string> import-id;
+    in-out property <string> import-name;
+    in property <string> import-status;
+    in property <string> import-original;
+    in-out property <string> import-query;
+    in property <[ImportCandidate]> import-candidates;
+    in property <bool> import-more;
+    callback import-action(string, int);
     in property <[Row]> queue;
     in property <[PluginRow]> plugin-rows;
     in property <bool> has-quality-setting;
@@ -317,7 +336,7 @@ export component AppWindow inherits Window {
         // feeding its preferred/minimum sizes back into the window constraints.
         x:0px;y:0px;width:root.width;height:root.height;
         capture-key-pressed(event) => {
-            if TextInputInterface.text-input-focused || root.show-catalog || root.show-login
+            if TextInputInterface.text-input-focused || root.show-catalog || root.show-login || root.import-step != ImportStep.closed
                 || event.modifiers.alt || event.modifiers.meta || (event.modifiers.control && event.modifiers.shift) {
                 return reject;
             }
@@ -413,6 +432,9 @@ export component AppWindow inherits Window {
                     HorizontalLayout {height:42px;spacing:10px;
                         Text {text:root.show-settings?"偏好与扩展":root.show-lyrics?"正在聆听":root.heading;color:Theme.ink;font-size:root.compact ? 24px : 28px;font-weight:700;min-width:0px;overflow:elide;horizontal-stretch:1;vertical-alignment:center;}
                         if root.album-detail&&!root.show-settings: ActionButton {text:"收藏专辑";clicked=>{root.action("save-album");}}
+                        if (root.source-index == 0 || root.remote-playlist) && !root.show-settings && !root.show-lyrics: ActionButton {
+                            text:root.remote-playlist ? "导入到本地歌单" : "导入歌单"; clicked=>{root.import-action("open", 0);}
+                        }
                         if root.album-detail&&!root.show-settings: ActionButton {text:"取消收藏";clicked=>{root.action("unsave-album");}}
                         if !root.cards&&root.rows.length>0&&!root.show-settings&&!root.show-lyrics: ActionButton {text:"播放全部";primary:true;clicked=>{root.action("play-all");}}
                     }
@@ -589,7 +611,7 @@ export component AppWindow inherits Window {
                                                 description:row.kind == "album" ? "收藏专辑" : row.like-pending ? "正在更新喜欢状态" : row.liked ? "取消喜欢" : "喜欢这首歌";
                                                 clicked=>{root.row-action(i,row.liked ? "unlike" : "like");}
                                             }
-                                            if row.account-actions: ListIconButton {
+                                            if row.account-actions || root.local-playlist: ListIconButton {
                                                 width:root.compact ? 28px : 36px;icon:@image-url("icons/close.svg");
                                                 enabled:root.local-playlist || row.kind == "album" || (row.liked && !row.like-pending);
                                                 description:row.kind == "album" ? "取消收藏专辑" : root.local-playlist ? "从当前歌单移除" : row.like-pending ? "正在更新喜欢状态"
@@ -697,13 +719,13 @@ export component AppWindow inherits Window {
                                         HorizontalLayout {spacing:8px;
                                             Cover {source:row.cover;width:40px;height:40px;border-radius:7px;}
                                             VerticalLayout {alignment:center;spacing:2px;min-width:0px;
-                                                Text {text:row.title;color:Theme.ink;font-size:12px;overflow:elide;min-width:0px;horizontal-stretch:1;vertical-alignment:center;}
+                                                Text {text:row.title;color:row.disabled ? Theme.muted : Theme.ink;font-size:12px;overflow:elide;min-width:0px;horizontal-stretch:1;vertical-alignment:center;}
                                                 if root.heartbeat-active && row.recommended: Text {text:"心动推荐";color:Theme.accent;font-size:10px;}
                                             }
                                         }
                                         TouchArea {enabled:!row.disabled;double-clicked=>{root.queue-action(i,"play");}}
                                     }
-                                    ListIconButton {description:"播放这首歌";icon:@image-url("icons/play.svg");clicked=>{root.queue-action(i,"play");}}
+                                    ListIconButton {description:row.disabled ? "这首歌暂时无法播放" : "播放这首歌";enabled:!row.disabled;icon:@image-url("icons/play.svg");clicked=>{root.queue-action(i,"play");}}
                                     if row.show-video: ListIconButton {description:"看视频";icon:@image-url("icons/video.svg");enabled:!row.disabled;clicked=>{root.queue-action(i,"video");}}
                                     ListIconButton {description:"从播放队列移除";width:26px;icon:@image-url("icons/close.svg");clicked=>{root.queue-action(i,"remove");}}
                                 }
@@ -773,6 +795,60 @@ export component AppWindow inherits Window {
                     }
                     Rectangle {vertical-stretch:1;}
                 }}
+            }
+        }
+    }
+    if root.import-step != ImportStep.closed: Rectangle {
+        background:#00000080;
+        TouchArea {}
+        Rectangle {
+            width:min(parent.width - 32px, 520px);
+            height:min(parent.height - 32px, root.import-step == ImportStep.matching ? 500px : root.import-step == ImportStep.confirm ? 210px : 414px);
+            x:(parent.width - self.width)/2; y:(parent.height - self.height)/2;
+            background:Theme.panel; border-radius:16px; border-width:1px; border-color:Theme.muted.with-alpha(0.25);
+            VerticalLayout {padding:18px; spacing:9px;
+                HorizontalLayout {height:32px;
+                    Text {text:root.import-step == ImportStep.matching ? "选择其他来源的版本" : root.import-step == ImportStep.confirm ? "歌单中有不可用歌曲" : "导入歌单";color:Theme.ink;font-size:20px;font-weight:600;vertical-alignment:center;horizontal-stretch:1;}
+                    ListIconButton {description:"关闭导入窗口";icon:@image-url("icons/close.svg");enabled:!root.import-busy;clicked=>{root.import-action("close", 0);}}
+                }
+                if root.import-step == ImportStep.form: ScrollView {HorizontalLayout {VerticalLayout {alignment:start;spacing:8px;
+                    Text {text:"来源插件";color:Theme.muted;font-size:12px;}
+                    HorizontalLayout {spacing:8px;
+                        ComboBox {model:root.import-sources;current-index<=>root.import-source-index;enabled:!root.import-busy && root.import-sources.length > 0;selected(v)=>{root.import-action("source", self.current-index);}}
+                        if root.import-can-browse: ActionButton {text:root.import-choices.length == 0 ? "读取我的歌单" : "更多歌单";enabled:!root.import-busy;clicked=>{root.import-action("browse",0);}}
+                    }
+                    if root.import-choices.length > 0: ComboBox {model:root.import-choices;enabled:!root.import-busy;selected(v)=>{root.import-action("pick",self.current-index);}}
+                    LineEdit {text<=>root.import-id;placeholder-text:"来源歌单 ID 或网易云歌单链接";enabled:!root.import-busy;}
+                    Text {text:"导入到";color:Theme.muted;font-size:12px;}
+                    ComboBox {model:root.import-targets;current-index<=>root.import-target-index;enabled:!root.import-busy;}
+                    if root.import-target-index == 0: LineEdit {text<=>root.import-name;placeholder-text:"新歌单名称（默认沿用来源歌单名）";enabled:!root.import-busy;}
+                }}}
+                if root.import-step == ImportStep.matching: Text {text:root.import-original;color:Theme.ink;font-weight:600;overflow:elide;}
+                if root.import-step == ImportStep.matching: HorizontalLayout {spacing:8px;
+                    LineEdit {text<=>root.import-query;placeholder-text:"曲名或歌手";enabled:!root.import-busy;accepted=>{root.import-action("search", 0);}}
+                    ActionButton {text:"搜索";enabled:!root.import-busy;clicked=>{root.import-action("search", 0);}}
+                }
+                if root.import-status != "": Text {text:root.import-status;color:Theme.muted;wrap:word-wrap;overflow:elide;min-height:18px;max-height:64px;}
+                if root.import-step == ImportStep.matching: ScrollView {VerticalLayout {alignment:start;spacing:5px;
+                    for candidate[i] in root.import-candidates: Rectangle {height:54px;background:Theme.elevated;border-radius:8px;
+                        HorizontalLayout {padding:8px;spacing:8px;
+                            VerticalLayout {horizontal-stretch:1;min-width:0px;alignment:center;
+                                Text {text:candidate.title;color:Theme.ink;overflow:elide;min-width:0px;}
+                                Text {text:candidate.detail;color:Theme.muted;font-size:11px;overflow:elide;min-width:0px;}
+                            }
+                            ActionButton {text:"选用此版本";primary:true;enabled:!root.import-busy;clicked=>{root.import-action("choose", i);}}
+                        }
+                    }
+                    if root.import-more: ActionButton {text:"更多结果 / 重试";enabled:!root.import-busy;clicked=>{root.import-action("more", 0);}}
+                }}
+                if root.import-step == ImportStep.confirm: Rectangle {vertical-stretch:1;}
+                HorizontalLayout {alignment:end;spacing:8px;
+                    if root.import-step == ImportStep.form: ActionButton {text:"导入";primary:true;enabled:!root.import-busy && root.import-sources.length > 0 && root.import-id != "";clicked=>{root.import-action("submit", 0);}}
+                    if root.import-step == ImportStep.confirm: ActionButton {text:"保留原曲并完成";clicked=>{root.import-action("close", 0);}}
+                    if root.import-step == ImportStep.confirm: ActionButton {text:"查询其他来源";primary:true;clicked=>{root.import-action("match", 0);}}
+                    if root.import-step == ImportStep.matching: ActionButton {text:"跳过这首";enabled:!root.import-busy;clicked=>{root.import-action("skip", 0);}}
+                    if root.import-step == ImportStep.matching: ActionButton {text:"完成";enabled:!root.import-busy;clicked=>{root.import-action("close", 0);}}
+                }
             }
         }
     }

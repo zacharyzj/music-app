@@ -3140,6 +3140,7 @@ dependencies = [
  "lofty",
  "music-core",
  "rusqlite",
+ "serde",
  "serde_json",
  "tempfile",
  "url",
