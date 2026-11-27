@@ -78,6 +78,12 @@ impl UiState {
             point.start = clock.start;
         }
         self.playing = !clock.start.paused;
+        if !self.previewing && self.playing && clock.start.position > 0. {
+            if let Some(failed) = &mut self.failed_queue_tracks {
+                failed.clear();
+            }
+            self.heartbeat_resolved();
+        }
         true
     }
 }
@@ -191,6 +197,99 @@ mod tests {
         state.stream_started(&ui, song.key);
         state.playback_ended(&ui, &jobs, &commands);
         assert!(state.resume.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn automatic_failures_try_each_available_recording_once() -> Result<()> {
+        let _clock = crate::test_ui::test_clock()?;
+        let ui = AppWindow::new()?;
+        let (jobs, rx) = mpsc::channel();
+        let (commands, _engine) = mpsc::channel();
+        for mode_steps in 0..4 {
+            let first = track("local", "a");
+            let second = track("local", "b");
+            let mut queue = Queue::default();
+            for _ in 0..mode_steps {
+                queue.cycle_playback_mode();
+            }
+            queue.items = vec![
+                first.clone(),
+                track("disabled", "c"),
+                first.clone(),
+                second.clone(),
+            ];
+            queue.index = Some(0);
+            let mut state = UiState::new(queue, Default::default(), vec![]);
+            play(&ui, &mut state, &jobs, &commands, first, PlayKind::Queue);
+            let first_load = state.play_generation;
+            state.track_failed(&ui, &jobs, &commands, first_load, "音乐源未返回播放地址");
+            assert_eq!(state.queue.index, Some(3));
+            let second_load = state.play_generation;
+            state.stream_started(&ui, second.key);
+            state.track_failed(&ui, &jobs, &commands, first_load, "上一首的延迟错误");
+            assert!(ui.get_playing());
+            // Obtaining a URL alone must not clear the first failure.
+            state.track_failed(&ui, &jobs, &commands, second_load, "无法解码");
+            let ids: Vec<_> = rx
+                .try_iter()
+                .filter(|j| j.request.op == "resolve")
+                .map(|j| j.request.args["id"].as_str().unwrap().to_owned())
+                .collect();
+            assert_eq!(ids, ["a", "b"]);
+            assert!(ui.get_status().contains("无法解码"));
+            assert!(ui.get_status().contains("没有可继续播放的歌曲"));
+            assert!(!ui.get_playing() && state.resume.is_none());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn failed_manual_play_preview_and_paused_playback_keep_the_queue_cursor() -> Result<()> {
+        let _clock = crate::test_ui::test_clock()?;
+        let ui = AppWindow::new()?;
+        let first = track("local", "a");
+        let second = track("local", "b");
+        let mut queue = Queue::default();
+        queue.items = vec![first.clone(), second.clone()];
+        queue.index = Some(0);
+        let mut state = UiState::new(queue, Default::default(), vec![]);
+        let (jobs, rx) = mpsc::channel();
+        let (commands, _engine) = mpsc::channel();
+        let saved = PlaybackStart {
+            position: 37.,
+            paused: true,
+        };
+        for kind in [
+            PlayKind::Audio,
+            PlayKind::Resume(saved),
+            PlayKind::Preview,
+            PlayKind::Queue,
+        ] {
+            let item = if kind == PlayKind::Preview {
+                second.clone()
+            } else {
+                first.clone()
+            };
+            play(&ui, &mut state, &jobs, &commands, item.clone(), kind);
+            if kind == PlayKind::Queue {
+                state.stream_started(&ui, item.key);
+                state.toggle_pause(&ui, &commands);
+            }
+            let generation = state.play_generation;
+            state.track_failed(&ui, &jobs, &commands, generation, "本次无法播放");
+            assert_eq!(
+                rx.try_iter().filter(|j| j.request.op == "resolve").count(),
+                1
+            );
+            assert_eq!(state.queue.index, Some(0));
+            let point = state.resume.as_ref().unwrap();
+            assert_eq!(point.item.key, first.key);
+            assert!(point.start.paused);
+            if matches!(kind, PlayKind::Preview | PlayKind::Resume(_)) {
+                assert_eq!(point.start, saved);
+            }
+        }
         Ok(())
     }
 

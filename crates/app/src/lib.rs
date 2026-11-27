@@ -103,6 +103,8 @@ struct UiState {
     previewing: bool,
     loaded: Option<ResourceKey>,
     play_generation: u64,
+    // Present while advancing the queue. Failed sources can be tried again after a song plays.
+    failed_queue_tracks: Option<HashSet<ResourceKey>>,
     video_page: video_page::VideoPage,
 }
 fn has_capability(plugins: &[(Manifest, bool)], id: &str, cap: &str) -> bool {
@@ -151,6 +153,7 @@ impl UiState {
             previewing: false,
             loaded: None,
             play_generation: 0,
+            failed_queue_tracks: None,
             video_page: Default::default(),
         }
     }
@@ -169,8 +172,6 @@ impl UiState {
     fn stream_started(&mut self, ui: &AppWindow, key: ResourceKey) {
         if self.previewing {
             finish_preview_load(ui, "");
-        } else {
-            self.heartbeat_resolved();
         }
         self.loaded = Some(key);
         self.playing = !self.playback_start().paused;
@@ -193,10 +194,73 @@ impl UiState {
             ui.set_version_preview(VersionPreview::default());
         } else {
             self.resume = None;
+            self.failed_queue_tracks = None;
+            self.heartbeat_resolved();
             if let Some(item) = self.advance_track(true, jobs) {
-                play(ui, self, jobs, player, item, PlayKind::Audio);
+                play(ui, self, jobs, player, item, PlayKind::Queue);
             }
         }
+    }
+
+    fn engine_failed(&mut self, ui: &AppWindow, message: &str) {
+        self.stop_heartbeat(ui);
+        self.failed_queue_tracks = None;
+        self.loaded = None;
+        self.playing = false;
+        ui.set_playing(false);
+        ui.set_has_error(true);
+        ui.set_status(message.into());
+        finish_preview_load(ui, message);
+    }
+
+    fn track_failed(
+        &mut self,
+        ui: &AppWindow,
+        jobs: &mpsc::Sender<Job>,
+        player: &mpsc::Sender<Command>,
+        generation: u64,
+        reason: &str,
+    ) {
+        if generation != self.play_generation {
+            return;
+        }
+        let Some(item) = &self.now_playing else {
+            return;
+        };
+        let mut message = format!("《{}》播放失败 · {reason}", item.title);
+        self.play_generation += 1;
+        self.loaded = None;
+        self.playing = false;
+        ui.set_playing(false);
+        if self.previewing {
+            finish_preview_load(ui, reason);
+        } else if !self.playback_start().paused {
+            if self.heartbeat.is_some() {
+                self.resume = None;
+                if self.skip_failed_heartbeat_track(ui, jobs, player, &message) {
+                    return;
+                }
+                message.push_str(" · 心动模式已停止");
+            } else if let Some(failed) = &mut self.failed_queue_tracks {
+                failed.insert(item.key.clone());
+                self.resume = None;
+                let next = self.queue.advance_available(false, rand::random(), |t| {
+                    playable(t, &self.plugins) && !failed.contains(&t.key)
+                });
+                if let Some(next) = next {
+                    ui.invoke_notify_row(format!("{message} · 已跳过").into());
+                    play(ui, self, jobs, player, next, PlayKind::Queue);
+                    return;
+                }
+                self.failed_queue_tracks = None;
+                message.push_str(" · 没有可继续播放的歌曲");
+            } else if let Some(point) = &mut self.resume {
+                point.start.paused = true;
+            }
+        }
+        ui.set_has_error(true);
+        ui.set_status(message.as_str().into());
+        ui.invoke_notify_row(message.into());
     }
 
     fn clear_page(&mut self, ui: &AppWindow) {
@@ -651,6 +715,7 @@ fn refresh_queue(ui: &AppWindow, state: &UiState) {
 #[derive(Clone, Copy, PartialEq)]
 enum PlayKind {
     Audio,
+    Queue,
     Resume(PlaybackStart),
     Video,
     Preview,
@@ -667,6 +732,8 @@ fn finish_preview_load(ui: &AppWindow, error: &str) {
     }
 }
 
+const ENGINE_UNAVAILABLE: &str = "播放引擎不可用，请检查 libmpv 路径后重启";
+
 fn play(
     ui: &AppWindow,
     state: &mut UiState,
@@ -679,6 +746,11 @@ fn play(
         return;
     }
     state.play_generation += 1;
+    if kind == PlayKind::Queue {
+        state.failed_queue_tracks.get_or_insert_with(HashSet::new);
+    } else {
+        state.failed_queue_tracks = None;
+    }
     ui.set_video_ended(false);
     ui.set_current_has_video(has_capability(&state.plugins, &item.key.source, "video"));
     ui.set_video_frame(slint::Image::default());
@@ -724,10 +796,7 @@ fn play(
     state.playing = false;
     ui.set_playing(false);
     if player.send(Command::Stop).is_err() {
-        state.stop_heartbeat(ui);
-        let message = "播放引擎不可用，请检查 libmpv 路径后重启";
-        ui.set_status(message.into());
-        finish_preview_load(ui, message);
+        state.engine_failed(ui, ENGINE_UNAVAILABLE);
         return;
     }
     ui.set_now_title(item.title.clone().into());
@@ -1156,6 +1225,7 @@ pub fn run_at(root: PathBuf) -> Result<()> {
                 }
             }
             "next" | "previous" => {
+                s.failed_queue_tracks = None;
                 let item = if a == "previous" {
                     let before = s.queue.index.unwrap_or(0).saturating_sub(1);
                     let index = s
@@ -1172,7 +1242,12 @@ pub fn run_at(root: PathBuf) -> Result<()> {
                     s.advance_track(false, &job)
                 };
                 if let Some(t) = item {
-                    play(&ui, &mut s, &job, &pc, t, PlayKind::Audio);
+                    let kind = if a == "next" {
+                        PlayKind::Queue
+                    } else {
+                        PlayKind::Audio
+                    };
+                    play(&ui, &mut s, &job, &pc, t, kind);
                 }
             }
             "cycle-mode" | "shuffle" => {
@@ -1192,11 +1267,12 @@ pub fn run_at(root: PathBuf) -> Result<()> {
                     return;
                 }
                 s.stop_heartbeat(&ui);
+                s.failed_queue_tracks = None;
                 s.replace_queue_from_page();
                 s.queue.index = None;
                 if let Some(t) = s.advance_available(false) {
                     refresh_queue(&ui, &s);
-                    play(&ui, &mut s, &job, &pc, t, PlayKind::Audio);
+                    play(&ui, &mut s, &job, &pc, t, PlayKind::Queue);
                 }
             }
             "library" => {
@@ -1739,20 +1815,15 @@ pub fn run_at(root: PathBuf) -> Result<()> {
                     s.login_inflight = false;
                 }
                 match reply.value {
+                    Err(e) if reply.op == "resolve" => {
+                        s.track_failed(&ui, &job, &pc, reply.generation, &e);
+                    }
                     Err(e) => {
                         ui.set_has_error(true);
                         ui.set_status(e.clone().into());
                         if ["loginStart", "loginPoll"].contains(&reply.op.as_str()) {
                             s.login_started = None;
                             s.login_key.clear();
-                        }
-                        if reply.op == "resolve" {
-                            s.playing = false;
-                            ui.set_playing(false);
-                            finish_preview_load(&ui, &e);
-                            if !s.previewing && s.skip_failed_heartbeat_track(&ui, &job, &pc) {
-                                continue;
-                            }
                         }
                         if ui.get_show_login() {
                             ui.set_login_message(e.into());
@@ -1761,9 +1832,9 @@ pub fn run_at(root: PathBuf) -> Result<()> {
                     Ok(v) => match reply.op.as_str() {
                         "resolve" => {
                             ui.set_has_error(false);
-                            if let Some(url) = v["url"].as_str() {
+                            if let Some(url) = v["url"].as_str().filter(|url| !url.is_empty()) {
                                 let _ = pc.send(Command::Normalize(s.normalization()));
-                                let _ = pc.send(Command::Open {
+                                let open = Command::Open {
                                     generation: s.play_generation,
                                     start: s.playback_start(),
                                     gains: music_player::Gains::from_stream(&v),
@@ -1777,7 +1848,11 @@ pub fn run_at(root: PathBuf) -> Result<()> {
                                         qualities: serde_json::from_value(v["qualities"].clone())
                                             .unwrap_or_default(),
                                     }),
-                                });
+                                };
+                                if pc.send(open).is_err() {
+                                    s.engine_failed(&ui, ENGINE_UNAVAILABLE);
+                                    continue;
+                                }
                                 s.stream_started(
                                     &ui,
                                     ResourceKey {
@@ -1790,6 +1865,14 @@ pub fn run_at(root: PathBuf) -> Result<()> {
                                     request: Request::new("lyrics", json!({"id":reply.args["id"]})),
                                     generation: reply.generation,
                                 });
+                            } else {
+                                s.track_failed(
+                                    &ui,
+                                    &job,
+                                    &pc,
+                                    reply.generation,
+                                    "音乐源未返回播放地址",
+                                );
                             }
                         }
                         "lyrics" => {
@@ -2173,17 +2256,13 @@ pub fn run_at(root: PathBuf) -> Result<()> {
                     PlayerEvent::InlineError(ticket, e) => s.video_page.error(&ui, ticket, e),
                     PlayerEvent::Outputs(devices) => sound.borrow_mut().outputs(&ui, &pc, devices),
                     PlayerEvent::AudioError(e) => ui.invoke_notify_row(e.into()),
+                    PlayerEvent::TrackFailed(generation, e) => {
+                        s.track_failed(&ui, &job, &pc, generation, &e);
+                    }
                     PlayerEvent::VideoControl(control) => {
                         PlaybackSettings::apply_video_control(&settings, &ui, control)
                     }
-                    PlayerEvent::Error(e) => {
-                        finish_preview_load(&ui, &e);
-                        ui.set_has_error(true);
-                        ui.set_status(e.into());
-                        s.loaded = None;
-                        s.playing = false;
-                        ui.set_playing(false);
-                    }
+                    PlayerEvent::Error(e) => s.engine_failed(&ui, &e),
                     PlayerEvent::Position(clock) => {
                         if !s.record_clock(clock) {
                             continue;

@@ -37,6 +37,8 @@ struct Event {
 struct EndFile {
     reason: c_int,
     error: c_int,
+    playlist_entry_id: i64,
+    playlist_insert_id: i64,
 }
 #[derive(Clone, Copy, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct PlaybackStart {
@@ -86,6 +88,7 @@ pub enum PlayerEvent {
     VideoControl(VideoControl),
     InlineError(u64, String),
     Ended(u64),
+    TrackFailed(u64, String),
     Error(String),
 }
 fn load_file(
@@ -251,6 +254,8 @@ unsafe fn run(
         }
         let _ = tx.send(PlayerEvent::Ready);
         let mut active = false;
+        let mut requested_entry = None;
+        let mut started_entry = None;
         let mut ticks = 0;
         let mut control_script = None;
         let mut routing = output::Routing::new();
@@ -316,6 +321,7 @@ unsafe fn run(
                             generation = next_generation;
                             pending_seek = None;
                             pending_file = None;
+                            requested_entry = None;
                             loudness.stop();
                             active = false;
                             let (url, menu) = if let Some(v) = &video {
@@ -323,7 +329,10 @@ unsafe fn run(
                                     match video::load_controls(h, *command) {
                                         Ok(script) => control_script = Some(script),
                                         Err(error) => {
-                                            let _ = tx.send(PlayerEvent::Error(error.to_string()));
+                                            let _ = tx.send(PlayerEvent::TrackFailed(
+                                                generation,
+                                                error.to_string(),
+                                            ));
                                             continue;
                                         }
                                     }
@@ -408,6 +417,7 @@ unsafe fn run(
                             inline.close();
                             active = false;
                             pending_file = None;
+                            requested_entry = None;
                             loudness.stop();
                             dispatch(h, *command, &["set", "user-data/music-video", ""])?;
                             vec!["stop".into()]
@@ -418,7 +428,10 @@ unsafe fn run(
                         && let status = dispatch(h, *command, &args)?
                         && status < 0
                     {
-                        let _ = tx.send(PlayerEvent::Error(
+                        if args[0] == "seek" {
+                            pending_seek = None;
+                        }
+                        let _ = tx.send(PlayerEvent::AudioError(
                             CStr::from_ptr(error(status)).to_string_lossy().into_owned(),
                         ));
                     }
@@ -431,11 +444,33 @@ unsafe fn run(
             if !loudness.waiting()
                 && let Some(args) = pending_file.take()
             {
-                let status = dispatch(h, *command, &args)?;
-                if status < 0 {
-                    let _ = tx.send(PlayerEvent::Error(
-                        CStr::from_ptr(error(status)).to_string_lossy().into_owned(),
-                    ));
+                let load = dispatch(h, *command, &args).and_then(|status| {
+                    if status < 0 {
+                        return Err(anyhow!(
+                            "{}",
+                            CStr::from_ptr(error(status)).to_string_lossy()
+                        ));
+                    }
+                    let mut entry = 0i64;
+                    let status = prop(
+                        h,
+                        c"playlist/0/id".as_ptr(),
+                        4,
+                        (&mut entry as *mut i64).cast(),
+                    );
+                    if status < 0 {
+                        return Err(anyhow!(
+                            "未能读取当前音轨 · {}",
+                            CStr::from_ptr(error(status)).to_string_lossy()
+                        ));
+                    }
+                    Ok(entry)
+                });
+                match load {
+                    Ok(entry) => requested_entry = Some(entry),
+                    Err(e) => {
+                        let _ = tx.send(PlayerEvent::TrackFailed(generation, e.to_string()));
+                    }
                 }
             }
             match routing.refresh(api, h) {
@@ -462,10 +497,15 @@ unsafe fn run(
                 {
                     inline_failure(&mut inline, err);
                 }
-                if e.event == 8 {
-                    active = true;
+                // File events from the previous load can arrive after its replacement.
+                if e.event == 6 && !e.data.is_null() {
+                    // MPV_EVENT_START_FILE carries the playlist entry ID as its first field.
+                    started_entry = Some(*e.data.cast::<i64>());
                 }
-                if e.event == 21 {
+                if e.event == 8 {
+                    active = requested_entry.is_some() && requested_entry == started_entry;
+                }
+                if e.event == 21 && active {
                     // MPV_EVENT_PLAYBACK_RESTART completes a load or seek.
                     pending_seek = None;
                 }
@@ -481,12 +521,23 @@ unsafe fn run(
                 }
                 if e.event == 7 && !e.data.is_null() {
                     let end = &*(e.data as *const EndFile);
-                    if active && end.reason == 0 {
+                    if requested_entry == Some(end.playlist_entry_id) {
                         active = false;
-                        let _ = tx.send(PlayerEvent::Ended(generation));
-                    } else if end.reason == 4 {
-                        active = false;
-                        let _ = tx.send(PlayerEvent::Error(format!("播放失败 ({})", end.error)));
+                        requested_entry = None;
+                        match end.reason {
+                            0 => {
+                                let _ = tx.send(PlayerEvent::Ended(generation));
+                            }
+                            4 => {
+                                let reason = CStr::from_ptr(error(end.error)).to_string_lossy();
+                                let _ = tx.send(PlayerEvent::TrackFailed(
+                                    generation,
+                                    reason.into_owned(),
+                                ));
+                            }
+                            5 => requested_entry = Some(end.playlist_insert_id),
+                            _ => {}
+                        }
                     }
                 }
             }

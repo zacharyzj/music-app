@@ -204,7 +204,11 @@ fn inline_frames_reach_slint_and_follow_the_original_audio_clock() -> Result<()>
                 {
                     return Ok(());
                 }
-                Ok(PlayerEvent::Error(e) | PlayerEvent::InlineError(_, e)) => bail!("{e}"),
+                Ok(
+                    PlayerEvent::Error(e)
+                    | PlayerEvent::InlineError(_, e)
+                    | PlayerEvent::TrackFailed(_, e),
+                ) => bail!("{e}"),
                 _ => {}
             }
         }
@@ -245,7 +249,10 @@ fn inline_frames_reach_slint_and_follow_the_original_audio_clock() -> Result<()>
                 }
             }
             for e in player.events.try_iter() {
-                if let PlayerEvent::InlineError(_, err) | PlayerEvent::Error(err) = e {
+                if let PlayerEvent::InlineError(_, err)
+                | PlayerEvent::Error(err)
+                | PlayerEvent::TrackFailed(_, err) = e
+                {
                     bail!("{err}");
                 }
             }

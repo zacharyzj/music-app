@@ -247,8 +247,8 @@ impl UiState {
             self.stop_heartbeat(ui);
             ui.invoke_notify_row(format!("心动模式已返回喜欢的歌曲 · {reason}").into());
         }
-        if waiting && let Some(next) = self.queue.advance(false, rand::random()) {
-            play(ui, self, jobs, player, next, PlayKind::Audio);
+        if waiting && let Some(next) = self.advance_available(false) {
+            play(ui, self, jobs, player, next, PlayKind::Queue);
         }
     }
 
@@ -257,6 +257,7 @@ impl UiState {
         ui: &AppWindow,
         jobs: &mpsc::Sender<Job>,
         player: &mpsc::Sender<Command>,
+        reason: &str,
     ) -> bool {
         let Some(mix) = self.heartbeat.as_mut() else {
             return false;
@@ -266,7 +267,7 @@ impl UiState {
             self.stop_heartbeat(ui);
             return false;
         }
-        ui.invoke_notify_row("心动模式已跳过无法播放的歌曲".into());
+        ui.invoke_notify_row(format!("{reason} · 心动模式已跳过").into());
         if let Some(next) = self.advance_track(false, jobs) {
             play(ui, self, jobs, player, next, PlayKind::Audio);
         }

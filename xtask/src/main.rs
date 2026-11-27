@@ -231,7 +231,7 @@ fn playback(url: &str, referrer: Option<&str>) -> Result<()> {
     let mut success = false;
     while Instant::now() < deadline {
         match player.events.recv_timeout(Duration::from_secs(2)) {
-            Ok(PlayerEvent::Error(e)) => {
+            Ok(PlayerEvent::Error(e) | PlayerEvent::TrackFailed(_, e)) => {
                 let _ = player.commands.send(Command::Quit);
                 bail!("{e}")
             }
