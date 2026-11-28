@@ -16,6 +16,10 @@ target/
 *.wasm
 *.apk
 *.aab
+*.keystore
+*.jks
+*.p12
+*.dpapi
 *.zip
 *.7z
 

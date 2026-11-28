@@ -14,7 +14,24 @@ pub struct Storage {
     key: [u8; 32],
     data: Value,
 }
+#[cfg(target_os = "android")]
+static ANDROID_KEY: std::sync::OnceLock<[u8; 32]> = std::sync::OnceLock::new();
+
 impl Storage {
+    #[cfg(target_os = "android")]
+    pub fn set_android_key(key: [u8; 32]) {
+        let _ = ANDROID_KEY.set(key);
+    }
+
+    #[cfg(target_os = "android")]
+    pub fn open(root: &Path, id: &str) -> Result<Self> {
+        let key = ANDROID_KEY
+            .get()
+            .ok_or_else(|| anyhow!("Android Keystore 不可用"))?;
+        Self::with_key(root.join(format!("{id}.enc")), *key)
+    }
+
+    #[cfg(not(target_os = "android"))]
     pub fn open(root: &Path, id: &str) -> Result<Self> {
         static KEY_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
         let guard = KEY_LOCK.lock().map_err(|_| anyhow!("凭据存储不可用"))?;

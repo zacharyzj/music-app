@@ -111,7 +111,7 @@ function Install-PendingPackage {
     Assert-PackagePath $done
     [IO.Directory]::Move($pending, $done)
 
-    $keep = @($installed, 'native') + $manifest.files + $deferred
+    $keep = @($installed, 'native', 'android') + $manifest.files + $deferred
     foreach ($entry in ([IO.DirectoryInfo]$dist).GetFileSystemInfos()) {
         if ($keep -notcontains $entry.Name) { $null = Move-ToRetired $entry }
     }

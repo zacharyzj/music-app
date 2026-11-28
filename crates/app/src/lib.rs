@@ -1,3 +1,5 @@
+#[cfg(target_os = "android")]
+mod android;
 mod cloud_upload;
 mod covers;
 mod download;
@@ -861,6 +863,7 @@ pub fn run() -> Result<()> {
 }
 pub fn run_at(root: PathBuf) -> Result<()> {
     let ui = AppWindow::new()?;
+    ui.set_mobile_platform(cfg!(target_os = "android"));
     #[cfg(windows)]
     window_behavior::install(&ui);
     let library = Library::open(&root)?;
@@ -1331,8 +1334,11 @@ pub fn run_at(root: PathBuf) -> Result<()> {
             "cancel-scan" => {
                 c.store(true, Ordering::Relaxed);
             }
-            "add-folder" =>
-            {
+            "add-folder" => {
+                #[cfg(target_os = "android")]
+                if let Err(error) = android::pick_files(false) {
+                    ui.invoke_notify_row(error.to_string().into());
+                }
                 #[cfg(not(target_os = "android"))]
                 if let Some(p) = rfd::FileDialog::new().pick_folder() {
                     ui.set_busy(true);
@@ -1340,6 +1346,10 @@ pub fn run_at(root: PathBuf) -> Result<()> {
                 }
             }
             "import" => {
+                #[cfg(target_os = "android")]
+                if let Err(error) = android::pick_files(true) {
+                    ui.invoke_notify_row(error.to_string().into());
+                }
                 #[cfg(not(target_os = "android"))]
                 if let Some(p) = rfd::FileDialog::new()
                     .add_filter("JavaScript 插件包", &["zip"])
@@ -1612,11 +1622,53 @@ pub fn run_at(root: PathBuf) -> Result<()> {
     let last_written = saved_preferences.clone();
     let live_player = player.clone();
     let mut last_normalization = music_player::Normalization::Off;
+    #[cfg(target_os = "android")]
+    let android_events = android::events();
+    #[cfg(target_os = "android")]
+    let mut last_android_state = None;
     timer.start(
         slint::TimerMode::Repeated,
         Duration::from_millis(100),
         move || {
             let Some(ui) = weak.upgrade() else { return };
+            #[cfg(target_os = "android")]
+            {
+                for (operation, value) in android_events.try_iter() {
+                    match operation.as_str() {
+                        "music" => {
+                            ui.set_busy(true);
+                            send(&job, &genr, "local", "scan", json!({"path":value}));
+                        }
+                        "plugin" => send(&job, &genr, "local", "install", json!({"path":value})),
+                        "play" if !ui.get_playing() => ui.invoke_action("pause".into()),
+                        "pause" if ui.get_playing() => ui.invoke_action("pause".into()),
+                        "previous" | "next" => ui.invoke_action(operation.into()),
+                        "seek" => {
+                            if let Ok(ms) = value.parse::<u64>() {
+                                ui.invoke_seek(ms as f32 / 1000.);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                let state = (
+                    ui.get_playing(),
+                    ui.get_now_title(),
+                    ui.get_now_artist(),
+                    ui.get_duration() as u64,
+                    ui.get_position() as u64 / 10,
+                );
+                if last_android_state.as_ref() != Some(&state) {
+                    let _ = android::playback(
+                        state.0,
+                        state.1.as_str(),
+                        state.2.as_str(),
+                        ui.get_position(),
+                        ui.get_duration(),
+                    );
+                    last_android_state = Some(state);
+                }
+            }
             let mut s = st.borrow_mut();
             s.sync_video_page(&ui, &job, &pc);
             for update in cloud_updates.try_iter() {
@@ -2665,9 +2717,21 @@ fn update_plugins(ui: &AppWindow, s: &mut UiState) {
 #[unsafe(no_mangle)]
 fn android_main(app: slint::android::AndroidApp) {
     slint::android::init(app.clone()).unwrap();
+    android::ACTIVITY.set(Some(app.clone()));
     if let Some(path) = app.internal_data_path() {
-        let _ = run_at(path);
+        let cache = android::cache_dir().unwrap_or_else(|_| path.join("tmp"));
+        if std::fs::create_dir_all(&cache).is_ok() {
+            let _ = tempfile::env::override_temp_dir(&cache);
+        }
+        match android::storage_key() {
+            Ok(key) => music_plugin_host::Storage::set_android_key(key),
+            Err(error) => eprintln!("Android Keystore: {error}"),
+        }
+        if let Err(error) = run_at(path) {
+            eprintln!("Music Player: {error}");
+        }
     }
+    android::ACTIVITY.take();
 }
 
 fn set_login_qr(ui: &AppWindow, text: &str) {

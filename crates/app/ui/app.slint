@@ -161,14 +161,17 @@ export component PlayerTray inherits SystemTrayIcon {
 
 export component AppWindow inherits Window {
     title:"Music Player";icon:@image-url("icons/app.svg");
-    out property <length> minimum-window-width:720px;
-    out property <length> minimum-window-height:480px;
+    in property <bool> mobile-platform;
+    private property <bool> phone: root.mobile-platform && root.width < 720px;
+    private property <bool> mobile-menu;
+    out property <length> minimum-window-width:root.mobile-platform ? 280px : 720px;
+    out property <length> minimum-window-height:root.mobile-platform ? 240px : 480px;
     preferred-width:1240px;preferred-height:820px;
     min-width:root.minimum-window-width;min-height:root.minimum-window-height;
-    background:Theme.bg;default-font-family:"Microsoft YaHei UI";default-font-size:13px;
+    background:Theme.bg;default-font-family: root.mobile-platform ? "sans-serif" : "Microsoft YaHei UI";default-font-size:13px;
     out property <bool> compact:root.width<980px;
-    private property <length> sidebar-width:root.compact ? 176px : 206px;
-    private property <length> player-height:root.compact ? 96px : 110px;
+    private property <length> sidebar-width:root.phone ? keyboard.width : root.compact ? 176px : 206px;
+    private property <length> player-height:root.phone ? 88px : root.compact ? 96px : 110px;
     private property <length> actions-width: (root.compact ? 64px : 86px)
         + (root.page-has-video ? (root.compact ? 32px : 50px) : 0px)
         + (root.can-download ? (root.compact ? 32px : 50px) : 0px)
@@ -369,7 +372,10 @@ export component AppWindow inherits Window {
     keyboard:=FocusScope {
         // The native window owns the size. Content adapts inside it instead of
         // feeding its preferred/minimum sizes back into the window constraints.
-        x:0px;y:0px;width:root.width;height:root.height;
+        x: root.mobile-platform ? root.safe-area-insets.left : 0px;
+        y: root.mobile-platform ? root.safe-area-insets.top : 0px;
+        width: root.width - self.x - (root.mobile-platform ? root.safe-area-insets.right : 0px);
+        height: root.height - self.y - (root.mobile-platform ? root.safe-area-insets.bottom : 0px);
         capture-key-pressed(event) => {
             if TextInputInterface.text-input-focused || root.show-catalog || root.show-login || root.show-cloud-upload || root.import-step != ImportStep.closed
                 || event.modifiers.alt || event.modifiers.meta || (event.modifiers.control && event.modifiers.shift) {
@@ -406,15 +412,21 @@ export component AppWindow inherits Window {
             return reject;
         }
         VerticalLayout {spacing:0;
-            HorizontalLayout {spacing:0;height:root.height - root.player-height;
-                Rectangle {width:root.sidebar-width;background:Theme.dark ? #15151c : #eeebf3;
+            if root.phone: HorizontalLayout {height:48px;padding-left:10px;padding-right:10px;spacing:8px;
+                ListIconButton {icon:@image-url("icons/queue.svg");description:root.mobile-menu ? "关闭导航" : "打开导航";clicked=>{root.mobile-menu=!root.mobile-menu;}}
+                Text {text:root.sources[root.source-index];color:Theme.ink;font-size:16px;font-weight:600;vertical-alignment:center;horizontal-stretch:1;}
+                if root.source-index == 0: ListIconButton {icon:@image-url("icons/plus.svg");description:"导入音乐文件";clicked=>{root.action("add-folder");}}
+                ListIconButton {icon:@image-url("icons/settings.svg");description:"设置与插件";clicked=>{root.mobile-menu=false;root.show-settings=!root.show-settings;}}
+            }
+            HorizontalLayout {spacing:0;height:keyboard.height - root.player-height - (root.phone ? 48px : 0px);
+                if !root.phone || root.mobile-menu: Rectangle {width:root.sidebar-width;background:Theme.dark ? #15151c : #eeebf3;
                     VerticalLayout {padding-top:root.compact ? 16px : 24px;padding-left:18px;padding-right:18px;padding-bottom:root.compact ? 12px : 16px;spacing:root.compact ? 8px : 12px;
                         HorizontalLayout {height:42px;spacing:10px;
                             Rectangle {width:34px;height:34px;border-radius:11px;background:Theme.accent;Image {source:@image-url("icons/disc.svg");colorize:#30233e;width:22px;height:22px;x:6px;y:6px;}}
                             Text {text:"MUSIC";font-weight:800;font-size:23px;color:Theme.ink;vertical-alignment:center;}
                         }
                         if !root.compact: Text {text:"听见你的日常";font-size:11px;color:Theme.muted;height:16px;}
-                        ComboBox {model:root.sources;current-index<=>root.source-index;selected(v)=>{root.select-source(self.current-index);}}
+                        ComboBox {model:root.sources;current-index<=>root.source-index;selected(v)=>{root.mobile-menu=false;root.select-source(self.current-index);}}
                         if !root.compact: Text {text:"音乐空间";font-size:11px;color:Theme.muted;height:26px;vertical-alignment:bottom;}
                         ScrollView {min-height:0px;vertical-stretch:1;VerticalLayout {spacing:5px;
                             for n[i] in root.nav: Rectangle {height:36px;border-radius:10px;background:root.nav-index==i&&!root.show-settings ? (Theme.dark ? #d6b6fa18 : #7953ac18) : nav-touch.has-hover ? Theme.elevated : transparent;
@@ -422,7 +434,7 @@ export component AppWindow inherits Window {
                                     Glyph {source:i==0 ? @image-url("icons/home.svg") : n.title=="每日推荐" ? @image-url("icons/disc.svg") : n.title=="喜欢的歌曲" ? @image-url("icons/heart.svg") : n.title=="我的云盘" ? @image-url("icons/cloud.svg") : @image-url("icons/queue.svg");tint:root.nav-index==i ? Theme.accent : Theme.muted;}
                                     Text {text:n.title;color:root.nav-index==i ? Theme.accent : Theme.ink;font-weight:root.nav-index==i?600:400;vertical-alignment:center;}
                                 }
-                                nav-touch:=TouchArea {mouse-cursor:pointer;clicked=>{root.show-lyrics=false;root.navigate(i);}}
+                                nav-touch:=TouchArea {mouse-cursor:pointer;clicked=>{root.mobile-menu=false;root.show-lyrics=false;root.navigate(i);}}
                             }
                         }}
                         Rectangle {height:1px;background:Theme.line;}
@@ -433,7 +445,7 @@ export component AppWindow inherits Window {
                         }
                         Rectangle {height:root.compact ? 36px : 42px;border-radius:10px;background:settings-touch.has-hover||root.show-settings ? Theme.elevated : transparent;
                             HorizontalLayout {padding-left:12px;spacing:11px;Glyph {source:@image-url("icons/settings.svg");}Text {text:"设置与插件";color:Theme.ink;vertical-alignment:center;}}
-                            settings-touch:=TouchArea {mouse-cursor:pointer;clicked=>{root.show-settings=!root.show-settings;}}
+                            settings-touch:=TouchArea {mouse-cursor:pointer;clicked=>{root.mobile-menu=false;root.show-settings=!root.show-settings;}}
                         }
                         Rectangle {height:root.compact ? 40px : 45px;
                             HorizontalLayout {spacing:10px;
@@ -444,11 +456,11 @@ export component AppWindow inherits Window {
                         }
                     }
                 }
-                VerticalLayout {padding:root.compact ? 16px : 24px;spacing:root.compact ? 10px : 12px;min-width:0px;min-height:0px;horizontal-stretch:1;
+                if !root.phone || !root.mobile-menu: VerticalLayout {padding:root.phone ? 10px : root.compact ? 16px : 24px;spacing:root.compact ? 10px : 12px;min-width:0px;min-height:0px;horizontal-stretch:1;
                     if root.show-global-search: HorizontalLayout {height:32px;spacing:12px;
                         if !root.compact: Text {min-width:0px;overflow:elide;text:root.source-index==0?"YOUR MUSIC LIBRARY":"MADE FOR YOUR MOMENTS";font-size:10px;color:Theme.muted;horizontal-stretch:1;vertical-alignment:center;}
-                        if root.compact: Rectangle {horizontal-stretch:1;}
-                        LineEdit {width:245px;placeholder-text:"搜索音乐、专辑、歌手";text<=>root.search-text;edited=>{root.suggest(self.text);}accepted=>{root.search(self.text,root.search-kind);}}
+                        if root.compact && !root.phone: Rectangle {horizontal-stretch:1;}
+                        LineEdit {width:root.phone ? max(100px,keyboard.width - 166px) : 245px;placeholder-text:"搜索音乐、专辑、歌手";text<=>root.search-text;edited=>{root.suggest(self.text);}accepted=>{root.search(self.text,root.search-kind);}}
                         ComboBox {width:92px;model:["歌曲","专辑","歌手","歌单"];current-index<=>root.search-kind;}
                         IconButton {icon:@image-url("icons/search.svg");clicked=>{root.search(root.search-text,root.search-kind);}}
                     }
@@ -492,7 +504,7 @@ export component AppWindow inherits Window {
                         }
                         Rectangle {height:(root.compact ? 208px : 160px) + (root.supports-tray ? 48px : 0px);border-radius:16px;background:Theme.panel;VerticalLayout {padding:20px;spacing:14px;
                             Text {text:"音乐与外观";color:Theme.ink;font-size:17px;font-weight:600;}
-                            HorizontalLayout {spacing:10px;ActionButton {text:"添加音乐目录";primary:true;clicked=>{root.action("add-folder");}}ActionButton {text:"重新扫描";clicked=>{root.action("scan");}}ActionButton {text:"取消扫描";clicked=>{root.action("cancel-scan");}}Rectangle{horizontal-stretch:1;}if !root.compact: CheckBox {text:"深色主题";checked<=>root.dark;}}
+                            HorizontalLayout {spacing:10px;ActionButton {text:root.mobile-platform ? "导入音乐" : "添加音乐目录";primary:true;clicked=>{root.action("add-folder");}}ActionButton {text:"重新扫描";clicked=>{root.action("scan");}}ActionButton {text:"取消扫描";clicked=>{root.action("cancel-scan");}}Rectangle{horizontal-stretch:1;}if !root.compact: CheckBox {text:"深色主题";checked<=>root.dark;}}
                             if root.compact: HorizontalLayout {Rectangle {horizontal-stretch:1;}CheckBox {text:"深色主题";checked<=>root.dark;}}
                             HorizontalLayout {spacing:12px;Text {text:"播放音质";color:Theme.muted;vertical-alignment:center;}ComboBox {width:150px;enabled:root.has-quality-setting;model:["跟随播放器","标准","高音质","无损","Hi-Res"];current-index:root.quality-index;selected(v)=>{root.quality(["follow","standard","high","lossless","hires"][self.current-index]);}}Rectangle{horizontal-stretch:1;}ActionButton {text:"退出当前账号";enabled:root.source-index>0&&!root.anonymous-source;clicked=>{root.action("logout");}}}
                             if root.supports-tray: HorizontalLayout {spacing:12px;
@@ -586,8 +598,8 @@ export component AppWindow inherits Window {
                             VerticalLayout {x:0px;y:0px;width:parent.width;height:parent.height;alignment:center;padding:empty-panel.short-panel ? 10px : root.compact ? 16px : 50px;spacing:empty-panel.short-panel ? 6px : root.compact ? 12px : 18px;
                                 if !empty-panel.short-panel: HorizontalLayout {alignment:center;height:root.compact ? 48px : 64px;Image {source:@image-url("icons/disc.svg");colorize:Theme.accent;width:root.compact ? 48px : 64px;height:self.width;}}
                                 Text {text:root.local-playlist ? (root.playlist-query != "" || root.playlist-filter-index > 0 ? "没有符合条件的歌曲" : "歌单里还没有歌曲") : root.can-filter&&root.guest-only?"当前结果中没有免登录可下载的歌曲":root.search-page?"没有找到匹配结果":root.source-index==0?"把喜欢的音乐，留在身边。":"此刻，这里还很安静。";color:Theme.ink;font-size:root.compact ? 18px : 23px;font-weight:600;wrap:word-wrap;min-width:0px;horizontal-alignment:center;}
-                                Text {text:root.local-playlist ? (root.playlist-query != "" || root.playlist-filter-index > 0 ? "可调整搜索词或来源筛选。" : root.local-playlist-kind == LocalPlaylistKind.favorites ? "点击本地音乐或本地歌单中歌曲旁的爱心，即可在这里查看。" : "可以导入歌单或从本地音乐添加歌曲。") : root.can-filter&&root.guest-only?"可关闭筛选查看其他录音。":root.search-page?"试试其他曲名或歌手名。":root.source-index==0?"添加音乐文件夹，让每一张唱片都有自己的位置。":"试试搜索喜欢的音乐，或切换到其他页面。";color:Theme.muted;font-size:12px;wrap:word-wrap;min-width:0px;horizontal-alignment:center;}
-                                HorizontalLayout {alignment:center;if root.more: ActionButton {text:root.next-label;clicked=>{root.action("more");}}if root.source-index==0&&!root.search-page&&!root.local-playlist: ActionButton {text:"添加音乐目录";primary:true;clicked=>{root.action("add-folder");}}}
+                                Text {text:root.local-playlist ? (root.playlist-query != "" || root.playlist-filter-index > 0 ? "可调整搜索词或来源筛选。" : root.local-playlist-kind == LocalPlaylistKind.favorites ? "点击本地音乐或本地歌单中歌曲旁的爱心，即可在这里查看。" : "可以导入歌单或从本地音乐添加歌曲。") : root.can-filter&&root.guest-only?"可关闭筛选查看其他录音。":root.search-page?"试试其他曲名或歌手名。":root.source-index==0?(root.mobile-platform ? "选择手机上的音乐文件，加入本地曲库。" : "添加音乐文件夹，让每一张唱片都有自己的位置。"):"试试搜索喜欢的音乐，或切换到其他页面。";color:Theme.muted;font-size:12px;wrap:word-wrap;min-width:0px;horizontal-alignment:center;}
+                                HorizontalLayout {alignment:center;if root.more: ActionButton {text:root.next-label;clicked=>{root.action("more");}}if root.source-index==0&&!root.search-page&&!root.local-playlist: ActionButton {text:root.mobile-platform ? "导入音乐" : "添加音乐目录";primary:true;clicked=>{root.action("add-folder");}}}
                             }
                         }
                         if root.cards&&root.rows.length>0: cards-view:=ScrollView {content-width:self.width;VerticalLayout {spacing:22px;
@@ -610,7 +622,7 @@ export component AppWindow inherits Window {
                             if root.more: ActionButton {text:root.next-label;enabled:!root.busy;clicked=>{root.action("more");}}
                         }}
                         if !root.cards&&root.rows.length>0: VerticalLayout {spacing:6px;
-                            HorizontalLayout {height:24px;padding-left:12px;padding-right:12px;spacing:root.compact ? 8px : 14px;Text {text:"#";width:25px;color:Theme.muted;font-size:11px;}Text {text:"歌曲 / 歌手";min-width:0px;horizontal-stretch:1;color:Theme.muted;font-size:11px;}if !root.compact: Text {text:"专辑";width:130px;color:Theme.muted;font-size:11px;}Text {text:"时长";width:48px;color:Theme.muted;font-size:11px;}Rectangle{width:root.actions-width;}}
+                            HorizontalLayout {height:24px;padding-left:12px;padding-right:12px;spacing:root.compact ? 8px : 14px;if !root.phone: Text {text:"#";width:25px;color:Theme.muted;font-size:11px;}Text {text:"歌曲 / 歌手";min-width:0px;horizontal-stretch:1;color:Theme.muted;font-size:11px;}if !root.compact: Text {text:"专辑";width:130px;color:Theme.muted;font-size:11px;}if !root.phone: Text {text:"时长";width:48px;color:Theme.muted;font-size:11px;}Rectangle{width:root.actions-width;}}
                             ScrollView {VerticalLayout {spacing:4px;
                                 for row[i] in root.rows: Rectangle {height:66px;border-radius:10px;background:row-touch.has-hover ? Theme.elevated : i/2==floor(i/2) ? Theme.panel.with-alpha(0.45) : transparent;
                                     row-touch:=TouchArea {
@@ -620,17 +632,17 @@ export component AppWindow inherits Window {
                                         mouse-cursor:self.can-switch-source ? pointer : default;
                                         clicked=>{
                                             if self.can-switch-source {root.row-action(i,"details");}
-                                            else if row.kind != "track" {root.row-action(i,"open");}
+                                            else if row.kind != "track" || (root.phone && !row.disabled) {root.row-action(i,"open");}
                                         }
-                                        double-clicked=>{if row.kind == "track" && !row.disabled {root.row-action(i,"open");}}
+                                        double-clicked=>{if !root.phone && row.kind == "track" && !row.disabled {root.row-action(i,"open");}}
                                         if self.can-switch-source: Tooltip {text:@markdown("单击切换播放来源");}
                                     }
                                     HorizontalLayout {padding:10px;spacing:root.compact ? 8px : 14px;
-                                        Text {text:(i+1);width:25px;color:Theme.muted;font-size:11px;vertical-alignment:center;}
+                                        if !root.phone: Text {text:(i+1);width:25px;color:Theme.muted;font-size:11px;vertical-alignment:center;}
                                         Cover {source:row.cover;width:44px;height:44px;border-radius:8px;}
                                         VerticalLayout {horizontal-stretch:1;alignment:center;spacing:5px;Text {text:row.title;color:row.disabled?Theme.muted:Theme.ink;font-size:14px;font-weight:500;overflow:elide;min-width:0px;}Text {text:row.subtitle;color:Theme.muted;font-size:11px;overflow:elide;min-width:0px;}}
                                         if !root.compact: Text {text:row.album;width:130px;color:Theme.muted;font-size:11px;overflow:elide;vertical-alignment:center;}
-                                        Text {text:row.duration;width:48px;color:Theme.muted;font-size:11px;vertical-alignment:center;}
+                                        if !root.phone: Text {text:row.duration;width:48px;color:Theme.muted;font-size:11px;vertical-alignment:center;}
                                         HorizontalLayout {width:root.actions-width;spacing:root.compact ? 4px : 14px;alignment:end;
                                             ListIconButton {
                                                 width:root.compact ? 28px : 36px;icon:@image-url("icons/play.svg");enabled:!row.disabled;
@@ -709,7 +721,25 @@ export component AppWindow inherits Window {
 
             }
             Rectangle {height:root.player-height;background:Theme.dark ? #1b1b23 : #ffffff;
-                HorizontalLayout {padding-left:root.compact ? 16px : 25px;padding-right:root.compact ? 16px : 25px;padding-top:root.compact ? 10px : 16px;padding-bottom:12px;spacing:root.compact ? 16px : 25px;
+                if root.phone: VerticalLayout {padding-left:10px;padding-right:10px;spacing:0px;
+                    HorizontalLayout {height:54px;spacing:6px;
+                        Cover {source:root.now-cover;width:40px;height:40px;border-radius:9px;}
+                        Rectangle {min-width:0px;horizontal-stretch:1;
+                            VerticalLayout {alignment:center;Text {text:root.now-title;color:Theme.ink;font-weight:600;overflow:elide;}
+                                Text {text:root.now-artist;color:Theme.muted;font-size:11px;overflow:elide;}}
+                            TouchArea {clicked=>{root.mobile-menu=false;root.show-settings=false;root.show-lyrics=!root.show-lyrics;}}
+                        }
+                        ListIconButton {icon:root.mode-appearance.icon;description:root.playback-mode-name;clicked=>{root.action("cycle-mode");}}
+                        ListIconButton {icon:root.playing ? @image-url("icons/pause.svg") : @image-url("icons/play.svg");description:root.playing ? "暂停" : "播放";clicked=>{root.action("pause");}}
+                        ListIconButton {icon:@image-url("icons/next.svg");description:"下一首";clicked=>{root.action("next");}}
+                        ListIconButton {icon:@image-url("icons/queue.svg");description:"播放队列";clicked=>{root.show-queue=!root.show-queue;}}
+                    }
+                    HorizontalLayout {height:30px;spacing:8px;
+                        Slider {minimum:0;maximum:max(1,root.duration);value:root.position;enabled:root.duration>0;released(v)=>{root.seek(v);}}
+                        Text {text:root.time-label;vertical-alignment:center;color:Theme.muted;font-size:10px;}
+                    }
+                }
+                HorizontalLayout {visible:!root.phone;padding-left:root.compact ? 16px : 25px;padding-right:root.compact ? 16px : 25px;padding-top:root.compact ? 10px : 16px;padding-bottom:12px;spacing:root.compact ? 16px : 25px;
                     HorizontalLayout {width:root.compact ? 180px : 265px;spacing:root.compact ? 10px : 13px;Cover {source:root.now-cover;width:root.compact ? 48px : 62px;height:self.width;border-radius:12px;}VerticalLayout {alignment:center;spacing:6px;Text {text:root.now-title;color:Theme.ink;font-size:13px;font-weight:600;overflow:elide;min-width:0px;}Text {text:root.now-artist;color:Theme.muted;font-size:11px;overflow:elide;min-width:0px;}}}
                     VerticalLayout {horizontal-stretch:1;spacing:8px;
                         HorizontalLayout {alignment:center;spacing:root.compact ? 8px : 16px;height:42px;

@@ -3105,6 +3105,7 @@ dependencies = [
  "anyhow",
  "directories",
  "image",
+ "jni 0.21.1",
  "keyring",
  "md5",
  "music-core",

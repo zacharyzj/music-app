@@ -294,7 +294,14 @@ impl Loudness {
     }
     fn apply(&mut self, api: AudioApi, h: Handle, gain: f64) -> Result<()> {
         if self.gain != gain {
-            api.command(h, &["set", "volume-gain", &gain.to_string()])?;
+            if api.text(h, "volume-gain").is_some() {
+                api.command(h, &["set", "volume-gain", &gain.to_string()])?;
+            } else if gain == 0. {
+                api.command(h, &["af", "remove", "@music-loudness"])?;
+            } else {
+                let filter = format!("@music-loudness:lavfi=[volume={gain}dB]");
+                api.command(h, &["af", "add", &filter])?;
+            }
             self.gain = gain;
         }
         Ok(())

@@ -4,6 +4,12 @@ Slint + Rust + libmpv 音乐播放器，使用 QuickJS 执行独立 JavaScript �
 
 当前版本为 **0.2.19**，应用内名称为 Music Player。版本和工具链分别由 [Cargo.toml](Cargo.toml) 与 [rust-toolchain.toml](rust-toolchain.toml) 管理。
 
+## Android 使用
+
+[下载 Music Player 0.2.19 安卓安装包（ARM64）](https://github.com/zacharyzj/music-app/releases/download/plugins-v0.2.19/MusicPlayer-android-arm64-v8a-0.2.19.apk)。支持 Android 8.0 及以上的 64 位 ARM 设备。下载后打开 APK，按系统提示允许此次安装。
+
+首次打开后，点顶部的 ＋ 选择手机上的音频文件，可以多选。歌曲会复制到应用自己的曲库，点歌名即可播放。打开右上角的设置，在「在线插件」里安装并启用网易云、哔哩哔哩等音乐源。手机的系统媒体控件支持暂停、继续和切歌。
+
 ## Windows 使用
 
 下载 Windows x64 便携包，解压后运行 `music-app.exe`，并将 `mpv-2.dll` 放在同一目录。[下载 Music Player 0.2.19](https://github.com/zacharyzj/music-app/releases/download/plugins-v0.2.19/MusicPlayer-windows-x64-0.2.19.zip)
@@ -140,9 +146,10 @@ cargo xtask probe-account "$env:APPDATA/music-api/MusicPlayer/data"
 | `plugins/incompetech-js` | Kevin MacLeod 开放曲库 JS 插件 |
 | `plugins/netease-js` | 网易云 JS 插件，基于 MIT 上游源码 |
 | `xtask` | JS 打包、联网探测及真实播放检查 |
-| `scripts` | Windows 原生依赖下载与发布包构建 |
+| `android` | Android 文件选择器、媒体服务、Keystore 和安装包资源 |
+| `scripts` | Windows 便携包与 Android APK 构建 |
 | `docs` | 插件协议、验收记录与历史版本说明 |
-| `.github/workflows` | 桌面构建测试与 Android 交叉检查 |
+| `.github/workflows` | 桌面构建测试与 Android APK 构建、签名校验 |
 | `legacy`、`crates/plugin-sdk`、`plugins/netease` | 旧 WASM 实现留档；当前应用不加载它 |
 
 `.ref` 仅作为参考，不参与构建。依赖精确版本见 `Cargo.lock`。
@@ -157,7 +164,18 @@ cargo xtask probe-account "$env:APPDATA/music-api/MusicPlayer/data"
 
 ## 平台范围
 
-本次交付 Windows x64。macOS/Linux 与 Android 交叉检查已配置 CI，未在本机完成运行验收。Android 的 SAF、Keystore、音频焦点、后台服务和 libmpv 打包尚未适配，不提供 APK。
+正式包覆盖 Windows x64 和 Android ARM64。macOS 和 Linux 配置了桌面 CI。
+
+### 自行构建 Android 正式包
+
+安装 Python 3.11+、JDK 21、Android SDK Platform 36、Build Tools 36.0.0、NDK 30.0.16248370 和用于 bindgen 的主机 libclang。设置 `ANDROID_HOME`、`ANDROID_NDK_HOME` 和 `JAVA_HOME`，需要时用 `LIBCLANG_PATH` 指向主机 libclang 所在目录。
+
+```sh
+rustup target add aarch64-linux-android
+python scripts/build-android.py
+```
+
+签名从环境变量 `MUSIC_ANDROID_KEYSTORE` 和 `MUSIC_ANDROID_STORE_PASSWORD` 读取。默认密钥别名为 `music-player`，可以通过 `MUSIC_ANDROID_KEY_ALIAS`、`MUSIC_ANDROID_KEY_PASSWORD` 指定其他别名或独立密码。请备份密钥与密码，后续覆盖升级须使用同一证书。脚本从 Cargo 版本生成 versionCode，校验 libmpv 下载哈希、APK 对齐和签名，正式包输出到 `dist/android/`。
 
 界面提供明暗主题、封面卡片、歌曲列表、歌词和队列。Coverflow、媒体系统快捷键和插件市场尚未实现。
 

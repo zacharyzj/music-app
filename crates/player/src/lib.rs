@@ -96,6 +96,7 @@ fn load_file(
     referrer: Option<String>,
     video: Option<Video>,
     position: f64,
+    has_playlist_index: bool,
 ) -> Vec<String> {
     let mut args = vec!["loadfile".into(), url, "replace".into()];
     let mut options = Vec::new();
@@ -116,7 +117,11 @@ fn load_file(
         options.push(format!("start={position}"));
     }
     if !options.is_empty() {
-        args.extend(["-1".into(), options.join(",")]);
+        // mpv 0.38 added a playlist-index argument before the per-file options.
+        if has_playlist_index {
+            args.push("-1".into());
+        }
+        args.push(options.join(","));
     }
     args
 }
@@ -171,6 +176,8 @@ unsafe fn run(
             "mpv-2.dll"
         } else if cfg!(target_os = "macos") {
             "libmpv.2.dylib"
+        } else if cfg!(target_os = "android") {
+            "libmpv.so"
         } else {
             "libmpv.so.2"
         };
@@ -181,8 +188,22 @@ unsafe fn run(
             Path::new(default)
         }))
         .map_err(|e| anyhow!("无法加载 libmpv（{default}）：{e}"))?;
+        #[cfg(target_os = "android")]
+        {
+            let set_vm = lib
+                .get::<unsafe extern "C" fn(*mut std::ffi::c_void, *mut std::ffi::c_void) -> c_int>(
+                    b"av_jni_set_java_vm",
+                )?;
+            anyhow::ensure!(
+                set_vm(ndk_context::android_context().vm(), std::ptr::null_mut()) >= 0,
+                "Android audio initialization failed"
+            );
+        }
         let create: libloading::Symbol<unsafe extern "C" fn() -> Handle> =
             lib.get(b"mpv_create")?;
+        let client_version =
+            lib.get::<unsafe extern "C" fn() -> std::ffi::c_ulong>(b"mpv_client_api_version")?;
+        let has_playlist_index = client_version() >= (2 << 16 | 3);
         let init: libloading::Symbol<unsafe extern "C" fn(Handle) -> c_int> =
             lib.get(b"mpv_initialize")?;
         let set: libloading::Symbol<
@@ -356,7 +377,13 @@ unsafe fn run(
                                 h,
                                 &["set", "pause", if start.paused { "yes" } else { "no" }],
                             )?;
-                            pending_file = Some(load_file(url, referrer, video, start.position));
+                            pending_file = Some(load_file(
+                                url,
+                                referrer,
+                                video,
+                                start.position,
+                                has_playlist_index,
+                            ));
                             Vec::new()
                         }
                         Command::ShowInline(v) => {

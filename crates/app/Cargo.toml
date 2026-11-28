@@ -28,6 +28,7 @@ reqwest = {version="0.12",default-features=false,features=["blocking","rustls-tl
 slint = {version="=1.19.1",default-features=false,features=["std","backend-winit","renderer-software","system-tray","unstable-winit-030","compat-1-2"]}
 rfd = "0.15"
 [target.'cfg(target_os = "android")'.dependencies]
+jni = "0.21"
 slint = {version="=1.19.1",default-features=false,features=["std","backend-android-activity-06","renderer-software","compat-1-2"]}
 [target.'cfg(windows)'.dependencies]
 windows-sys = {version="0.61",features=["Win32_Foundation","Win32_Graphics_Gdi","Win32_UI_HiDpi","Win32_UI_Shell","Win32_UI_WindowsAndMessaging"]}

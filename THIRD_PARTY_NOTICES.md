@@ -30,6 +30,15 @@ THE SOFTWARE.
 
 ## Native player and dependencies
 
+The Android APK includes the default ARM64 build of libmpv from media-kit
+libmpv-android-video-build v1.1.7. The optional x86_64 build uses the same
+release. The upstream build disables GPL-only mpv code. The APK includes
+mpv's copyright notices, LGPL text and the build project's license under
+`assets/licenses/`. The shared library is packaged separately from the app.
+
+[Android build scripts and dependency sources](https://github.com/media-kit/libmpv-android-video-build/tree/v1.1.7/buildscripts)
+and [corresponding mpv source](https://github.com/mpv-player/mpv/tree/78d43740f52db817d98bcf24fb30a76ab6fa13ff).
+
 The Windows build script downloads shinchiro/mpv-winbuild-cmake release 20261111,
 mpv revision bcde6b93cc, x86_64 shared development build. Archive SHA-256:
 273C079B11EA5575822F972756F4C9A71149A5C10130353ABEB8586738938452.
